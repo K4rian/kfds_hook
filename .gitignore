@@ -1,0 +1,8 @@
+*.o
+*.so
+*.d
+*.log
+*.json
+
+build/*
+.cache/*
