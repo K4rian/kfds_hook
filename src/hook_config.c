@@ -1,23 +1,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "inih/ini.h"
-
 #include "hook_config.h"
 #include "hook_log.h"
-#include "kfds_hook.h"
+#include "inih/ini.h"
 
 // ============================================================================
 // CONFIG GLOBAL STATE
 // ============================================================================
 hook_config_t g_config = {
     .hook_enabled = 1,
-    .log_level = HOOK_LOG_LEVEL_ALL,
+    .log_level = HOOK_LOG_LEVEL_INFO,
     .log_file = "",
+    .socket_path = "/tmp/kfds_hook.sock",
+    .socket_maxpoll = 100,
+    .socket_deadline = 2,
 };
 
 // ============================================================================
-// CONFIG
+// CONFIG HANDLER
 // ============================================================================
 static int config_handler(void *user, const char *section, const char *name,
                           const char *value) {
@@ -26,20 +27,39 @@ static int config_handler(void *user, const char *section, const char *name,
     return 1; // section header, skip
 
 #define MATCH(s, n) (strcmp(section, s) == 0 && strcmp(name, n) == 0)
-  if (MATCH("hook", "log_level")) {
-    if (strcmp(value, "all") == 0)
-      c->log_level = HOOK_LOG_LEVEL_ALL;
-    else if (strcmp(value, "errors") == 0)
-      c->log_level = HOOK_LOG_LEVEL_ERRORS;
+  if (MATCH("hook", "hook_enabled")) {
+    c->hook_enabled = atoi(value);
+  } else if (MATCH("hook", "log_level")) {
+    if (strcmp(value, "debug") == 0)
+      g_config.log_level = HOOK_LOG_LEVEL_DEBUG;
+    else if (strcmp(value, "info") == 0)
+      g_config.log_level = HOOK_LOG_LEVEL_INFO;
+    else if (strcmp(value, "warn") == 0)
+      g_config.log_level = HOOK_LOG_LEVEL_WARN;
+    else if (strcmp(value, "error") == 0)
+      g_config.log_level = HOOK_LOG_LEVEL_ERROR;
     else if (strcmp(value, "silent") == 0)
-      c->log_level = HOOK_LOG_LEVEL_SILENT;
+      g_config.log_level = HOOK_LOG_LEVEL_SILENT;
+    else
+      g_config.log_level = HOOK_LOG_LEVEL_INFO;
   } else if (MATCH("hook", "log_file")) {
     strncpy(c->log_file, value, sizeof(c->log_file) - 1);
+  } else if (MATCH("socket", "socket_path")) {
+    strncpy(c->socket_path, value, sizeof(c->socket_path) - 1);
+  } else if (MATCH("socket", "socket_maxpoll")) {
+    c->socket_maxpoll = atoi(value);
+  } else if (MATCH("socket", "socket_deadline")) {
+    c->socket_deadline = atoi(value);
+    if (c->socket_deadline < 1)
+      c->socket_deadline = 1;
   }
 #undef MATCH
   return 1;
 }
 
+// ============================================================================
+// CONFIG
+// ============================================================================
 void hook_load_config(void) {
   // Resolve config path env override
   const char *path = getenv("KFDS_HOOK_CONFIG");
@@ -54,13 +74,11 @@ void hook_load_config(void) {
 
   if (r == -1) {
     // File not found, silently use defaults
-    hook_log(HOOK_LOG_LEVEL_ALL, "no config file at %s, using defaults\n",
-             path);
+    hook_log_warn("no config file at %s, using defaults\n", path);
   } else if (r > 0) {
-    hook_log(HOOK_LOG_LEVEL_ALL, "config parse error at line %d in %s\n", r,
-             path);
+    hook_log_error("config parse error at line %d in %s\n", r, path);
   } else {
-    hook_log(HOOK_LOG_LEVEL_ALL, "config loaded from %s\n", path);
+    hook_log_info("config loaded from %s\n", path);
   }
-  hook_log(HOOK_LOG_LEVEL_ALL, "log_level=%d\n", g_config.log_level);
+  hook_log_debug("log_level=%d\n", g_config.log_level);
 }

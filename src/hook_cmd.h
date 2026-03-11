@@ -1,9 +1,9 @@
-#ifndef KFDS_HOOK_H
-#define KFDS_HOOK_H
+#ifndef HOOK_CMD_H
+#define HOOK_CMD_H
 
 // ============================================================================
-// KFDS_HOOK DEFINES
+// COMMAND DISPATCHER
 // ============================================================================
-#define HOOK_REVISION "2"
+void hook_command_dispatch(void);
 
-#endif /* KFDS_HOOK_H */
+#endif /* HOOK_CMD_H */

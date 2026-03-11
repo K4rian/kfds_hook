@@ -1,16 +1,11 @@
 CC      = gcc
 CFLAGS  = -D_GNU_SOURCE -std=gnu99 -m32 -fPIC -O1 -Wall -Wextra -g
 CFLAGS  += -Ivendor
+CFLAGS += -DJSMN_STATIC
 LDFLAGS = -shared -lpthread -m32
 
 OUT     = kfds_hook.so
-SRCS    = src/kfds_hook.c \
-          src/hook_config.c \
-          src/hook_engine.c \
-          src/hook_log.c \
-          src/hook_trampoline.c \
-          src/hook_ucs2.c \
-		  vendor/inih/ini.c
+SRCS    = $(wildcard src/*.c) $(wildcard vendor/inih/*.c)
 
 .PHONY: all clean
 

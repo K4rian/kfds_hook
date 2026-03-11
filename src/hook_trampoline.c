@@ -3,16 +3,21 @@
 #include <sys/mman.h>
 #include <sys/un.h>
 
+#include "hook_cmd.h"
 #include "hook_engine.h"
 #include "hook_log.h"
+#include "hook_socket.h"
 #include "hook_trampoline.h"
 
 // ============================================================================
-// TRAMPOLINE
+// TRAMPOLINE STATIC STATE
 // ============================================================================
 static uint8_t tick_original_bytes[5];
 static UGameEngine_Tick_fn tick_trampoline = NULL;
 
+// ============================================================================
+// TRAMPOLINE
+// ============================================================================
 /*
  * Patches UGameEngine::Tick with a 5-byte relative JMP to hooked_Tick.
  * A trampoline stub containing the original 5 bytes + JMP back to Tick+5
@@ -28,14 +33,13 @@ void hook_install_trampoline(void) {
   uint8_t *trampoline = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (trampoline == MAP_FAILED) {
-    hook_log(HOOK_LOG_LEVEL_ALL, "FATAL: mmap failed: %s\n", strerror(errno));
+    hook_log_error("mmap failed: %s\n", strerror(errno));
     return;
   }
 
   uintptr_t page = (uintptr_t)target & ~(uintptr_t)0xFFF;
   if (mprotect((void *)page, 8192, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-    hook_log(HOOK_LOG_LEVEL_ALL, "FATAL: mprotect failed: %s\n",
-             strerror(errno));
+    hook_log_error("mprotect failed: %s\n", strerror(errno));
     return;
   }
 
@@ -54,8 +58,8 @@ void hook_install_trampoline(void) {
 
   memcpy(target, jmp, 5);
 
-  hook_log(HOOK_LOG_LEVEL_ALL, "Tick hooked at %p, trampoline at %p\n", target,
-           (void *)trampoline);
+  hook_log_debug("Tick hooked at %p, trampoline at %p\n", target,
+                 (void *)trampoline);
 }
 
 // ============================================================================
@@ -67,10 +71,11 @@ void hook_install_trampoline(void) {
 void hooked_Tick(void *self, float delta_seconds) {
   if (!GGameEngine) {
     game_engine_store(self);
-    hook_log(HOOK_LOG_LEVEL_ALL, "UGameEngine* captured: %p\n", self);
+    hook_log_debug("UGameEngine* captured: %p\n", self);
   }
 
-  // TODO
+  if (hook_socket_poll() && !is_server_busy(self))
+    hook_command_dispatch();
 
   tick_trampoline(self, delta_seconds);
 }

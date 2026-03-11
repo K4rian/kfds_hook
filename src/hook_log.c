@@ -6,28 +6,33 @@
 
 #include "hook_config.h"
 #include "hook_log.h"
-#include "kfds_hook.h"
 
 // ============================================================================
-// LOG GLOBAL STATE
+// LOG STATIC STATE
 // ============================================================================
-static FILE *g_log_file = NULL;
+static const char *const log_prefixes[] = {
+    [HOOK_LOG_LEVEL_DEBUG] = "DEBUG",
+    [HOOK_LOG_LEVEL_INFO] = "INFO ",
+    [HOOK_LOG_LEVEL_WARN] = "WARN ",
+    [HOOK_LOG_LEVEL_ERROR] = "ERROR",
+};
+static FILE *log_file = NULL;
 
 // ============================================================================
 // LOG
 // ============================================================================
-static inline void hook_log_ts(FILE *fp) {
+static void hook_log_ts(FILE *fp) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   struct tm tm_info;
   gmtime_r(&ts.tv_sec, &tm_info);
   char tbuf[32];
   strftime(tbuf, sizeof(tbuf), "%Y-%m-%dT%H:%M:%S", &tm_info);
-  fprintf(fp, "[kfds_hook %s.%06ldZ] ", tbuf, ts.tv_nsec / 1000);
+  fprintf(fp, "%s.%06ldZ", tbuf, ts.tv_nsec / 1000);
 }
 
 void hook_log(hook_log_level_t level, const char *fmt, ...) {
-  if (level > g_config.log_level)
+  if (level < g_config.log_level)
     return;
 
   // Re-entrance guard
@@ -36,18 +41,27 @@ void hook_log(hook_log_level_t level, const char *fmt, ...) {
     return;
   active = 1;
 
-  va_list args;
-  fprintf(stderr, "[kfds_hook] ");
-  va_start(args, fmt);
-  vfprintf(stderr, fmt, args);
-  va_end(args);
+  const char *prefix = (level < (hook_log_level_t)(sizeof(log_prefixes) /
+                                                   sizeof(log_prefixes[0])))
+                           ? log_prefixes[level]
+                           : "?????";
+  FILE *targets[2];
+  int ntargets = 0;
+  if (level >= HOOK_LOG_LEVEL_WARN || log_file == NULL)
+    targets[ntargets++] = stderr;
+  if (log_file)
+    targets[ntargets++] = log_file;
 
-  if (g_log_file) {
-    hook_log_ts(g_log_file);
+  for (int i = 0; i < ntargets; i++) {
+    va_list args;
+    fprintf(targets[i], "[kfds_hook ");
+    hook_log_ts(targets[i]);
+    fprintf(targets[i], "] [%s] ", prefix);
     va_start(args, fmt);
-    vfprintf(g_log_file, fmt, args);
+    vfprintf(targets[i], fmt, args);
     va_end(args);
-    fflush(g_log_file);
+    if (targets[i] == log_file)
+      fflush(log_file);
   }
   active = 0;
 }
@@ -58,15 +72,15 @@ void hook_log(hook_log_level_t level, const char *fmt, ...) {
 void hook_log_open(const char *path) {
   hook_log_close();
 
-  g_log_file = fopen(path, "a");
-  if (!g_log_file)
-    fprintf(stderr, "kfds_hook: warning: could not open log_file %s: %s\n",
-            g_config.log_file, strerror(errno));
+  log_file = fopen(path, "a");
+  if (!log_file)
+    fprintf(stderr, "[WARN] kfds_hook: could not open log_file %s: %s\n", path,
+            strerror(errno));
 }
 
 void hook_log_close(void) {
-  if (g_log_file) {
-    fclose(g_log_file);
-    g_log_file = NULL;
+  if (log_file) {
+    fclose(log_file);
+    log_file = NULL;
   }
 }
