@@ -47,19 +47,28 @@ void hook_log(hook_log_level_t level, const char *fmt, ...) {
                            : "?????";
   FILE *targets[2];
   int ntargets = 0;
-  if (level >= HOOK_LOG_LEVEL_WARN || log_file == NULL)
-    targets[ntargets++] = stderr;
+
+  targets[ntargets++] = stderr;
   if (log_file)
     targets[ntargets++] = log_file;
 
   for (int i = 0; i < ntargets; i++) {
     va_list args;
-    fprintf(targets[i], "[kfds_hook ");
-    hook_log_ts(targets[i]);
-    fprintf(targets[i], "] [%s] ", prefix);
     va_start(args, fmt);
+
+    // File format:   [kfds_hook] <DATE> [<PREFIX>] <MESSAGE>
+    // stderr format: [kfds_hook] [<PREFIX>] <MESSAGE>
+    if (targets[i] == log_file) {
+      fprintf(targets[i], "[kfds_hook] ");
+      hook_log_ts(targets[i]);
+      fprintf(targets[i], " [%s] ", prefix);
+    } else {
+      fprintf(targets[i], "[kfds_hook] [%s] ", prefix);
+    }
+
     vfprintf(targets[i], fmt, args);
     va_end(args);
+
     if (targets[i] == log_file)
       fflush(log_file);
   }

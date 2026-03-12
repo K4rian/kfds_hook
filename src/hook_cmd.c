@@ -7,6 +7,10 @@
 #include "hook_socket.h"
 #include "kfds_hook.h"
 
+#ifdef DEBUG
+#include "hook_cmd_debug.h"
+#endif
+
 // ============================================================================
 // COMMAND HELPERS
 // ============================================================================
@@ -108,11 +112,15 @@ void hook_command_dispatch(void) {
   const char *cmd = g_socket_slot.req.cmd;
   hook_log_debug("Executing cmd: %s\n", cmd);
 
+  // TODO: Dispatch table
+
   // Ping
   if (strcmp(cmd, "Ping") == 0) {
     cmd_ping();
     return;
   }
+
+  // --------------------------------------------------------------------------
 
   // Level objects required for all remaining commands
   void *level_info = NULL, *game_info = NULL;
@@ -139,4 +147,14 @@ void hook_command_dispatch(void) {
     cmd_say(game_info);
     return;
   }
+
+  // --------------------------------------------------------------------------
+
+#ifdef DEBUG
+  // Debug - GameReplicationInfo (GRI) hex dump to file
+  if (strcmp(cmd, "DebugGRIDump") == 0) {
+    cmd_debug_gri_dump();
+    return;
+  }
+#endif
 }

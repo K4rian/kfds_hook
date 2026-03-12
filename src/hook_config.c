@@ -10,11 +10,16 @@
 // ============================================================================
 hook_config_t g_config = {
     .hook_enabled = 1,
+    #ifdef DEBUG
+    .log_level = HOOK_LOG_LEVEL_DEBUG,
+    #else
     .log_level = HOOK_LOG_LEVEL_INFO,
+    #endif
     .log_file = "",
     .socket_path = "/tmp/kfds_hook.sock",
     .socket_maxpoll = 100,
     .socket_deadline = 2,
+    .debug_dump_dir = "./dump",
 };
 
 // ============================================================================
@@ -52,6 +57,8 @@ static int config_handler(void *user, const char *section, const char *name,
     c->socket_deadline = atoi(value);
     if (c->socket_deadline < 1)
       c->socket_deadline = 1;
+  } else if (MATCH("debug", "debug_dump_dir")) {
+    strncpy(c->debug_dump_dir, value, sizeof(c->debug_dump_dir) - 1);
   }
 #undef MATCH
   return 1;

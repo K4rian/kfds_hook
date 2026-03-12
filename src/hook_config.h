@@ -14,6 +14,8 @@ typedef struct {
   char socket_path[108];      // Unix socket path (max 107 + NUL)
   int socket_maxpoll;         // TBI
   int socket_deadline;        // command timeout seconds
+
+  char debug_dump_dir[256];   // dump directory path
 } hook_config_t;
 
 // ============================================================================

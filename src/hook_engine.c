@@ -7,6 +7,9 @@
 // ============================================================================
 void *GGameEngine = NULL;
 
+UObject_GetName_fn UObject_GetName = 
+    (UObject_GetName_fn)ADDR_UObject_GetName;
+
 UGameEngine_Exec_fn UGameEngine_Exec =
     (UGameEngine_Exec_fn)ADDR_UGameEngine_Exec;
 
@@ -71,4 +74,31 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
   *out_level_info = level_info;
   *out_game_info = game_info;
   return 1;
+}
+
+/*
+ * Find the GRI actor by scanning for an object whose name starts with "GameR"
+ */
+void *find_gri(void) {
+  void *level = *(void **)((uint8_t *)GGameEngine + UGAMEENGINE_LEVEL_OFFSET);
+  if (!level)
+    return NULL;
+
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+
+    const ucs2_t *name = UObject_GetName(actor);
+    if (!name)
+      continue;
+
+    for (int j = 0; name[j]; j++)
+      if (name[j] == 'G' && name[j + 1] == 'a' && name[j + 2] == 'm' &&
+          name[j + 3] == 'e' && name[j + 4] == 'R')
+        return actor;
+  }
+  return NULL;
 }

@@ -6,6 +6,8 @@
 // ============================================================================
 // ENGINE FUNCTION ADDRESSES
 // ============================================================================
+#define ADDR_UObject_GetName 0x08076642
+
 #define ADDR_UGameEngine_Tick 0x08143866
 #define ADDR_UGameEngine_Exec 0x08129874
 
@@ -83,6 +85,8 @@ typedef struct {
 // ============================================================================
 // ENGINE FUNCTION POINTERS
 // ============================================================================
+typedef const ucs2_t *(*UObject_GetName_fn)(void *);
+
 typedef void (*UGameEngine_Tick_fn)(void *, float);
 typedef int (*UGameEngine_Exec_fn)(void *, const ucs2_t *, void *);
 
@@ -110,6 +114,8 @@ typedef void (*FString_dtor_fn)(FString *);
  */
 extern void *GGameEngine;
 
+extern UObject_GetName_fn UObject_GetName;
+
 extern UGameEngine_Exec_fn UGameEngine_Exec;
 
 extern ULevel_GetLevelInfo_fn ULevel_GetLevelInfo;
@@ -131,5 +137,6 @@ void *game_engine_load(void);
 // ============================================================================
 int is_server_busy(void *engine);
 int get_level_objects(void **out_level_info, void **out_game_info);
+void *find_gri(void);
 
 #endif /* HOOK_ENGINE_H */

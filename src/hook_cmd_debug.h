@@ -1,9 +1,13 @@
-#ifndef KFDS_HOOK_H
-#define KFDS_HOOK_H
+#ifndef HOOK_CMD_DEBUG_H
+#define HOOK_CMD_DEBUG_H
+
+#ifdef DEBUG
 
 // ============================================================================
-// KFDS_HOOK DEFINES
+// DEBUG COMMANDS
 // ============================================================================
-#define HOOK_REVISION "4"
+void cmd_debug_gri_dump(void);
 
-#endif /* KFDS_HOOK_H */
+#endif /* DEBUG */
+
+#endif /* HOOK_CMD_DEBUG_H */

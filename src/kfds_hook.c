@@ -7,6 +7,12 @@
 #include "hook_trampoline.h"
 #include "kfds_hook.h"
 
+#ifdef DEBUG
+  #define BUILD_VARIANT "_debug"
+#else
+  #define BUILD_VARIANT ""
+#endif
+
 // ============================================================================
 // KFDS_HOOK STATIC STATE
 // ============================================================================
@@ -32,7 +38,7 @@ __attribute__((constructor)) static void hook_attach(void) {
   sigaction(SIGTERM, &sa, &old_sigterm);
 
   hook_load_config();
-  hook_log_info("kfds_hook loaded (r%s)\n", HOOK_REVISION);
+  hook_log_info("kfds_hook loaded (r%s%s)\n", HOOK_REVISION, BUILD_VARIANT);
 
   if (!g_config.hook_enabled) {
     hook_log_warn("hook_enabled=0, skipping hook installation\n");
