@@ -203,9 +203,33 @@ void hook_command_dispatch(void) {
   // --------------------------------------------------------------------------
 
 #ifdef DEBUG
-  // Debug - GameReplicationInfo (GRI) hex dump to file
+  // GameReplicationInfo (GRI) hex dump to file
   if (strcmp(cmd, "DebugGRIDump") == 0) {
     cmd_debug_gri_dump();
+    return;
+  }
+
+  // Actor list hex dump to file
+  if (strcmp(cmd, "DebugActorsDump") == 0) {
+    cmd_debug_actors_dump();
+    return;
+  }
+
+  // PlayerController (PC) list hex dump to file
+  if (strcmp(cmd, "DebugPCDump") == 0) {
+    cmd_debug_pc_dump();
+    return;
+  }
+
+  // PlayerController (PC) Pawn hex dump to file
+  if (strcmp(cmd, "DebugPCPawnDump") == 0) {
+    cmd_debug_pcpawn_dump();
+    return;
+  }
+
+  // PlayerController (PC) Network Connection hex dump to file
+  if (strcmp(cmd, "DebugPCNetConnDump") == 0) {
+    cmd_debug_pcnetconn_dump();
     return;
   }
 #endif

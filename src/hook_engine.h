@@ -51,7 +51,7 @@
 #define ALEVELINFO_GAMEINFO_OFFSET 0x5f4
 
 /*
- * GameReplicationInfo (GRI)
+ * AGameReplicationInfo (GRI)
  *   +0x3fc  ServerName       FString
  *   +0x408  ShortName        FString
  *   +0x414  AdminName        FString
@@ -80,6 +80,17 @@
 #define GRI_OFFSET_TimeToNextWave   0x5f8
 #define GRI_OFFSET_bWaveInProgress  0x5fc
 #define GRI_OFFSET_GameDiff         0x678
+
+/*
+ * APlayerController
+ *   +0x360  APawn*
+ *           NULL when dead, set when alive/spawned
+ *   +0x490  APlayerReplicationInfo*
+ *   +0x514  UNetConnection*
+ */
+#define APLAYERCONTROLLER_OFFSET_PAWN    0x360
+#define APLAYERCONTROLLER_OFFSET_PRI     0x490
+#define APLAYERCONTROLLER_OFFSET_NETCONN 0x514
 
 // ============================================================================
 // ENGINE TYPES
