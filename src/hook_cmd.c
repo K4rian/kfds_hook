@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 
 #include "hook_cmd.h"
@@ -54,7 +55,7 @@ static void cmd_exec(void) {
   arg_to_ucs2(0, buf, ARG_MAX_CHARS);
 
   void *glog = *(void **)ADDR_GLOG_PTR;
-  int handled = UGameEngine_Exec((void *)GGameEngine, buf, glog);
+  int handled = UGameEngine_Exec((void *)hook_engine_get(), buf, glog);
 
   hook_log_debug("Exec: '%s' handled=%d\n", g_socket_slot.req.args[0], handled);
   hook_socket_finish_ok();
@@ -106,6 +107,51 @@ static void cmd_say(void *game_info) {
 }
 
 // ============================================================================
+// COMMAND - WAVE STATE
+// ============================================================================
+static void cmd_get_wave_state(void) {
+  void *gri = find_gri();
+  if (!gri) {
+    hook_socket_finish_err("GRI not found");
+    return;
+  }
+
+  uint8_t *base = (uint8_t *)gri;
+
+  // WaveNumber: 0-indexed in engine (wave 1 = 0, wave 4 = 3)
+  // bWaveInProgress at +0x5fc: 1=wave active, 0=trader/lobby
+  // Both read as uint8_t and stored as single byte
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{");
+  jb_raw(&jb, "\"wave_in_progress\":");
+  jb_bool(&jb, *(uint8_t *)(base + GRI_OFFSET_bWaveInProgress));
+  jb_raw(&jb, ",\"wave_number\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_WaveNumber));
+  jb_raw(&jb, ",\"final_wave\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_FinalWave));
+  jb_raw(&jb, ",\"num_monsters\":");
+  jb_int(&jb, *(int *)(base + GRI_OFFSET_numMonsters));
+  jb_raw(&jb, ",\"time_to_next_wave\":");
+  jb_int(&jb, *(int *)(base + GRI_OFFSET_TimeToNextWave));
+  jb_raw(&jb, ",\"base_difficulty\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_BaseDifficulty));
+  jb_raw(&jb, ",\"game_diff\":");
+
+  float gd = *(float *)(base + GRI_OFFSET_GameDiff);
+  char fbuf[32];
+  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
+  jb_raw(&jb, fbuf);
+
+  jb_raw(&jb, ",\"game_started\":");
+  jb_bool(&jb, is_game_started());
+  jb_raw(&jb, "}}");
+
+  // TODO: lOG
+  hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
 // COMMAND DISPATCHER
 // ============================================================================
 void hook_command_dispatch(void) {
@@ -145,6 +191,12 @@ void hook_command_dispatch(void) {
   // Say - Admin Server Message
   if (strcmp(cmd, "Say") == 0) {
     cmd_say(game_info);
+    return;
+  }
+
+  // WaveState - Get Wave State
+  if (strcmp(cmd, "WaveState") == 0) {
+    cmd_get_wave_state();
     return;
   }
 

@@ -137,8 +137,7 @@ static void handle_client(int client_fd) {
   // Status query
   // Answered directly on the socket thread, no game thread needed
   if (req.type == 'S') {
-    void *ge = game_engine_load();
-    int busy = !ge || is_server_busy(ge);
+    int busy =  (!hook_engine_get() || is_server_busy());
     const char *resp = busy ? "{\"ready\":false}\n" : "{\"ready\":true}\n";
     SEND_PTR_OR_LOG(client_fd, resp);
     goto done;
@@ -147,8 +146,7 @@ static void handle_client(int client_fd) {
   // Game command
   // Hand off to the game thread via the slot
   if (req.type == 'X') {
-    void *ge = game_engine_load();
-    if (!ge || is_server_busy(ge)) {
+    if (!hook_engine_get() || is_server_busy()) {
       SEND_OR_LOG(client_fd, "{\"ok\":false,\"e\":\"busy\"}\n");
       goto done;
     }

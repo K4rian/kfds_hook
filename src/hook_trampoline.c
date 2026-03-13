@@ -3,10 +3,8 @@
 #include <sys/mman.h>
 #include <sys/un.h>
 
-#include "hook_cmd.h"
 #include "hook_engine.h"
 #include "hook_log.h"
-#include "hook_socket.h"
 #include "hook_trampoline.h"
 
 // ============================================================================
@@ -66,16 +64,9 @@ void hook_install_trampoline(void) {
 // HOOKED FUNCTIONS
 // ============================================================================
 /*
- * Runs on every game tick. Captures GGameEngine on first call
+ * Runs on every game tick
  */
 void hooked_Tick(void *self, float delta_seconds) {
-  if (!GGameEngine) {
-    game_engine_store(self);
-    hook_log_debug("UGameEngine* captured: %p\n", self);
-  }
-
-  if (hook_socket_poll() && !is_server_busy(self))
-    hook_command_dispatch();
-
+  hook_engine_tick(self);
   tick_trampoline(self, delta_seconds);
 }

@@ -1,14 +1,33 @@
 #include <stddef.h>
 
+#include "hook_cmd.h"
 #include "hook_engine.h"
+#include "hook_log.h"
+#include "hook_socket.h"
+
+// ============================================================================
+// ENGINE DEFINES
+// ============================================================================
+#define GAME_STARTED_PROBE_INTERVAL 30 // Check once per second at 30 Hz
+
+// ============================================================================
+// ENGINE STATIC STATE
+// ============================================================================
+/*
+ * Captured on the first hook_engine_tick() call, never changed again.
+ * Written once by the game thread via atomic store and read via
+ * hook_engine_get().
+ */
+static void *GGameEngine = NULL;
+
+static void *last_level_ptr = NULL;     // Tracks level changes via UGameEngine
+static int game_started = 0;            // Set on bWaveInProgress transition
+static int game_started_tick_count = 0; // Tick counter for game_started probe
 
 // ============================================================================
 // ENGINE GLOBAL STATE
 // ============================================================================
-void *GGameEngine = NULL;
-
-UObject_GetName_fn UObject_GetName = 
-    (UObject_GetName_fn)ADDR_UObject_GetName;
+UObject_GetName_fn UObject_GetName = (UObject_GetName_fn)ADDR_UObject_GetName;
 
 UGameEngine_Exec_fn UGameEngine_Exec =
     (UGameEngine_Exec_fn)ADDR_UGameEngine_Exec;
@@ -27,11 +46,54 @@ FString_dtor_fn FString_dtor = (FString_dtor_fn)ADDR_FString_dtor;
 // ============================================================================
 // ENGINE
 // ============================================================================
-void game_engine_store(void *engine) {
-  __atomic_store_n(&GGameEngine, engine, __ATOMIC_RELEASE);
+static void update_game_state(void) {
+  void *engine = hook_engine_get();
+  if (!engine)
+    return;
+
+  // Level change detection
+  void *cur_level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  if (cur_level && last_level_ptr && cur_level != last_level_ptr) {
+    hook_log_debug("level change detected (%p -> %p)\n", last_level_ptr,
+                   cur_level);
+    game_started = 0;
+    game_started_tick_count = 0;
+  }
+  if (cur_level)
+    last_level_ptr = cur_level;
+
+  // game_started probe, once per GAME_STARTED_PROBE_INTERVAL ticks
+  if (!game_started && cur_level) {
+    if ((game_started_tick_count++ % GAME_STARTED_PROBE_INTERVAL) == 0) {
+      void *gri = find_gri();
+      if (gri) {
+        uint8_t wip = *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_bWaveInProgress);
+        if (wip) {
+          game_started = 1;
+          hook_log_debug("game_started set\n");
+        }
+      }
+    }
+  }
 }
 
-void *game_engine_load(void) {
+/*
+ * Triggers on every game tick.
+ * Captures GGameEngine on first call.
+ */
+void hook_engine_tick(void *self) {
+  if (!GGameEngine) {
+    __atomic_store_n(&GGameEngine, self, __ATOMIC_RELEASE);
+    hook_log_debug("UGameEngine* captured: %p\n", self);
+  }
+
+  update_game_state();
+
+  if (hook_socket_poll() && !is_server_busy())
+    hook_command_dispatch();
+}
+
+void *hook_engine_get(void) {
   return __atomic_load_n(&GGameEngine, __ATOMIC_ACQUIRE);
 }
 
@@ -40,9 +102,10 @@ void *game_engine_load(void) {
 // ============================================================================
 /*
  * Returns 1 if the engine is not ready to process commands:
- * engine pointer is NULL or a level transition is in progress
+ * engine pointer is NULL or a level transition is in progress.
  */
-int is_server_busy(void *engine) {
+int is_server_busy(void) {
+  void *engine = hook_engine_get();
   if (!engine)
     return 1;
 
@@ -52,10 +115,45 @@ int is_server_busy(void *engine) {
 }
 
 /*
- * Resolves the active level objects from GGameEngine
- * Returns 1 and populates out_level_info and out_game_info on success
+ * Returns 1 if the current game session has started (first bWaveInProgress
+ * false->true transition observed), 0 otherwise.
+ */
+int is_game_started(void) {
+    return game_started;
+}
+
+/*
+ * Returns 1 if the UObject name contains "PlayerController" as a substring.
+ * Names shorter than 16 chars exit immediately without scanning.
+ */
+int is_player_controller(const ucs2_t *name) {
+  if (!name)
+    return 0;
+
+  int len = 0;
+  while (name[len])
+    len++;
+
+  if (len < 16)
+    return 0;
+
+  for (int j = 0; j <= len - 16; j++) {
+    if (name[j] == 'P' && name[j + 1] == 'l' && name[j + 2] == 'a' &&
+        name[j + 3] == 'y' && name[j + 4] == 'e' && name[j + 5] == 'r' &&
+        name[j + 6] == 'C' && name[j + 7] == 'o' && name[j + 8] == 'n' &&
+        name[j + 9] == 't' && name[j + 10] == 'r' && name[j + 11] == 'o' &&
+        name[j + 12] == 'l' && name[j + 13] == 'l' && name[j + 14] == 'e' &&
+        name[j + 15] == 'r')
+      return 1;
+  }
+  return 0;
+}
+
+/*
+ * Resolves the active level objects from GGameEngine.
+ * Returns 1 and populates out_level_info and out_game_info on success.
  * Returns 0 if the engine is not fully initialised or a level transition
- * is in progress
+ * is in progress.
  */
 int get_level_objects(void **out_level_info, void **out_game_info) {
   void *level = *(void **)((uint8_t *)GGameEngine + UGAMEENGINE_LEVEL_OFFSET);
@@ -77,7 +175,7 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
 }
 
 /*
- * Find the GRI actor by scanning for an object whose name starts with "GameR"
+ * Find the GRI actor by scanning for an object whose name starts with "GameR".
  */
 void *find_gri(void) {
   void *level = *(void **)((uint8_t *)GGameEngine + UGAMEENGINE_LEVEL_OFFSET);

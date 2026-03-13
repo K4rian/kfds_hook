@@ -50,6 +50,37 @@
  */
 #define ALEVELINFO_GAMEINFO_OFFSET 0x5f4
 
+/*
+ * GameReplicationInfo (GRI)
+ *   +0x3fc  ServerName       FString
+ *   +0x408  ShortName        FString
+ *   +0x414  AdminName        FString
+ *   +0x420  AdminEmail       FString
+ *   +0x42c  ServerRegion     int
+ *   +0x430  MessageOfTheDay  FString
+ *   +0x5c8  WaveNumber       byte
+ *   +0x5c9  BaseDifficulty   byte
+ *   +0x5ca  FinalWave        byte
+ *   +0x5cc  numMonsters      int
+ *   +0x5d0  bWaveInProgress  int
+ *   +0x5f8  TimeToNextWave   int   (replication of KFGameType.WaveCountDown)
+ *   +0x5fc  bWaveInProgress  bool  (1=wave active, 0=trader/lobby)
+ *   +0x678  GameDiff         float (replication of BaseDifficulty)
+ */
+#define GRI_OFFSET_ServerName       0x3fc
+#define GRI_OFFSET_ShortName        0x408
+#define GRI_OFFSET_AdminName        0x414
+#define GRI_OFFSET_AdminEmail       0x420
+#define GRI_OFFSET_ServerRegion     0x42c
+#define GRI_OFFSET_MessageOfTheDay  0x430
+#define GRI_OFFSET_WaveNumber       0x5c8
+#define GRI_OFFSET_BaseDifficulty   0x5c9
+#define GRI_OFFSET_FinalWave        0x5ca
+#define GRI_OFFSET_numMonsters      0x5cc
+#define GRI_OFFSET_TimeToNextWave   0x5f8
+#define GRI_OFFSET_bWaveInProgress  0x5fc
+#define GRI_OFFSET_GameDiff         0x678
+
 // ============================================================================
 // ENGINE TYPES
 // ============================================================================
@@ -103,17 +134,6 @@ typedef void (*FString_dtor_fn)(FString *);
 // ============================================================================
 // ENGINE GLOBAL STATE
 // ============================================================================
-/*
- * Captured on the first hooked_Tick call, never changed again
- *
- * Written by the game thread (hooked_Tick)
- *
- * Use GGameEngine_store() for the single write and GGameEngine_load() for
- * any read. Reads that are always on the game thread may access GGameEngine
- * directly
- */
-extern void *GGameEngine;
-
 extern UObject_GetName_fn UObject_GetName;
 
 extern UGameEngine_Exec_fn UGameEngine_Exec;
@@ -129,13 +149,15 @@ extern FString_dtor_fn FString_dtor;
 // ============================================================================
 // ENGINE
 // ============================================================================
-void game_engine_store(void *engine);
-void *game_engine_load(void);
+void hook_engine_tick(void *self);
+void *hook_engine_get(void);
 
 // ============================================================================
 // ENGINE HELPERS
 // ============================================================================
-int is_server_busy(void *engine);
+int is_server_busy(void);
+int is_game_started(void);
+int is_player_controller(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
 void *find_gri(void);
 
