@@ -7,6 +7,7 @@
 // DEBUG COMMANDS
 // ============================================================================
 void cmd_debug_gri_dump(void);
+void cmd_debug_pri_dump(void);
 void cmd_debug_actors_dump(void);
 void cmd_debug_pc_dump(void);
 void cmd_debug_pcpawn_dump(void);

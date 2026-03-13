@@ -209,6 +209,12 @@ void hook_command_dispatch(void) {
     return;
   }
 
+  // PlayerReplicationInfo (PRI) hex dump to file
+  if (strcmp(cmd, "DebugPRIDump") == 0) {
+    cmd_debug_pri_dump();
+    return;
+  }
+
   // Actor list hex dump to file
   if (strcmp(cmd, "DebugActorsDump") == 0) {
     cmd_debug_actors_dump();

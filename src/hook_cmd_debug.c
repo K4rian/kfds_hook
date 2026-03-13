@@ -152,6 +152,69 @@ void cmd_debug_gri_dump(void) {
 }
 
 /*
+ * Dumps the PlayerReplicationInfo (PRI) memory layout.
+ */
+void cmd_debug_pri_dump(void) {
+  char path[512];
+  FILE *f = dump_open("PRIDump",
+                      g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
+                          ? g_socket_slot.req.args[0]
+                          : NULL,
+                      path, sizeof(path));
+
+  if (!f) {
+    hook_socket_finish_err("failed to open dump file");
+    return;
+  }
+
+  void *gri = find_gri();
+  if (!gri) {
+    fclose(f);
+    hook_socket_finish_err("GRI not found");
+    return;
+  }
+
+  void **pri_data = *(void ***)((uint8_t *)gri + 0x47c);
+  int pri_num = *(int *)((uint8_t *)gri + 0x480);
+  if (!pri_data || pri_num <= 0) {
+    fclose(f);
+    hook_socket_finish_err("no players");
+    return;
+  }
+
+  for (int p = 0; p < pri_num; p++) {
+    void *pri = pri_data[p];
+    if (!pri)
+      continue;
+
+    const ucs2_t *name = UObject_GetName(pri);
+    char label[128];
+    char name_buf[64] = "(unknown)";
+    if (name) {
+      int j = 0;
+      while (name[j] && j < 63) {
+        name_buf[j] = (char)name[j];
+        j++;
+      }
+      name_buf[j] = '\0';
+    }
+    snprintf(label, sizeof(label), "PRI[%d]=%p (%s) +0x000..+0x5ff", p, pri,
+             name_buf);
+    hexdump_to(f, label, (uint8_t *)pri + 0x000, 0x600);
+  }
+
+  fclose(f);
+  hook_log_debug("PRIDump saved to %s\n", path);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_str(&jb, path);
+  jb_raw(&jb, "}");
+  hook_socket_finish_json(&jb);
+}
+
+/*
  * Dumps every non-null actor in the level actor list.
  * Output per actor: index, pointer, and full UObject name.
  */

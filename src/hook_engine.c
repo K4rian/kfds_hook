@@ -156,7 +156,11 @@ int is_player_controller(const ucs2_t *name) {
  * is in progress.
  */
 int get_level_objects(void **out_level_info, void **out_game_info) {
-  void *level = *(void **)((uint8_t *)GGameEngine + UGAMEENGINE_LEVEL_OFFSET);
+  void *engine = hook_engine_get();
+  if (!engine)
+    return 0;
+
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
   if (!level)
     return 0;
 
@@ -178,7 +182,11 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
  * Find the GRI actor by scanning for an object whose name starts with "GameR".
  */
 void *find_gri(void) {
-  void *level = *(void **)((uint8_t *)GGameEngine + UGAMEENGINE_LEVEL_OFFSET);
+  void *engine = hook_engine_get();
+  if (!engine)
+    return NULL;
+
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
   if (!level)
     return NULL;
 
