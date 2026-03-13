@@ -13,6 +13,12 @@ typedef enum {
 } hook_log_level_t;
 
 // ============================================================================
+// LOG FILE
+// ============================================================================
+void hook_log_open(const char *path);
+void hook_log_close(void);
+
+// ============================================================================
 // LOG
 // ============================================================================
 void hook_log(hook_log_level_t level, const char *fmt, ...)
@@ -22,8 +28,5 @@ void hook_log(hook_log_level_t level, const char *fmt, ...)
 #define hook_log_info(...) hook_log(HOOK_LOG_LEVEL_INFO, __VA_ARGS__)
 #define hook_log_warn(...) hook_log(HOOK_LOG_LEVEL_WARN, __VA_ARGS__)
 #define hook_log_error(...) hook_log(HOOK_LOG_LEVEL_ERROR, __VA_ARGS__)
-
-void hook_log_open(const char *path);
-void hook_log_close(void);
 
 #endif /* HOOK_LOG_H */
