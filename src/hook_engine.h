@@ -113,6 +113,20 @@
 #define APLAYERCONTROLLER_OFFSET_PRI     0x490
 #define APLAYERCONTROLLER_OFFSET_NETCONN 0x514
 
+/*
+ * KFGameType (Invasion)
+ *   +0x1568  bTradingDoorsOpen  bool  (1=trader, 0=wave)
+ *   +0x157c  bWaveInProgress    bool  (0=trader, 1=wave)
+ *   +0x1578  WaveCountDown      int   (countdown seconds)
+ *   +0x03bc  GameDifficulty     float
+ *   +0x049c  MaxPlayers         int
+ */
+#define GAMETYPE_OFFSET_bTradingDoorsOpen 0x1568
+#define GAMETYPE_OFFSET_bWaveInProgress   0x157c
+#define GAMETYPE_OFFSET_WaveCountDown     0x1578
+#define GAMETYPE_OFFSET_GameDifficulty    0x03bc
+#define GAMETYPE_OFFSET_MaxPlayers        0x049c
+
 // ============================================================================
 // ENGINE TYPES
 // ============================================================================

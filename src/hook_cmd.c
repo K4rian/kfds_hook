@@ -248,7 +248,8 @@ void cmd_get_server_info(void) {
 }
 
 static void cmd_get_level_url(void) {
-  void *level = *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
   if (!level) {
     hook_socket_finish_err("level not ready");
     return;
@@ -440,6 +441,39 @@ static void cmd_get_wave_state(void) {
 }
 
 // ============================================================================
+// COMMAND - SKIP TRADER
+// ============================================================================
+/*
+ * Forces trader countdown to 6 seconds.
+ * Targets KFGameType.WaveCountDown, NOT GRI.TimeToNextWave.
+ * GRI.TimeToNextWave is a replicated mirror and overwritten from WaveCountDown
+ * every tick, so writing it directly has no lasting effect.
+ * Value below 5 breaks the internal script logic and lead to unexpected
+ * behavior.
+ */
+static void cmd_skip_trader(void *game_info) {
+  int wip = 
+        *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bWaveInProgress);
+  int doorsopen =
+      *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bTradingDoorsOpen);
+  if (wip || !doorsopen) {
+    hook_socket_finish_err("not in trader time");
+    return;
+  }
+
+  // Already at or below minimum
+  int countdown =
+      *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_WaveCountDown);
+  if (countdown <= 6) {
+    hook_socket_finish_ok();
+    return;
+  }
+
+  *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_WaveCountDown) = 6;
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
 // COMMAND DISPATCHER
 // ============================================================================
 void hook_command_dispatch(void) {
@@ -497,6 +531,12 @@ void hook_command_dispatch(void) {
   // WaveState - Get Wave State
   if (strcmp(cmd, "WaveState") == 0) {
     cmd_get_wave_state();
+    return;
+  }
+
+  // SkipTrader - Set Trader Countdown to 6s
+  if (strcmp(cmd, "SkipTrader") == 0) {
+    cmd_skip_trader(game_info);
     return;
   }
 
