@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hook_cmd.h"
@@ -16,9 +17,9 @@
 // COMMAND HELPERS
 // ============================================================================
 /*
- * Convert g_socket_slot.req.args[idx] (UTF-8) to ucs2_t for engine calls
- * Produces empty string if idx >= argument count
- * Uses utf8_to_ucs2, locale-independent, no mbstowcs
+ * Convert g_socket_slot.req.args[idx] (UTF-8) to ucs2_t for engine calls.
+ * Produces empty string if idx >= argument count.
+ * Uses utf8_to_ucs2, locale-independent, no mbstowcs.
  */
 static void arg_to_ucs2(int idx, ucs2_t *buf, size_t buf_len) {
   if (idx >= g_socket_slot.req.argc) {
@@ -26,6 +27,66 @@ static void arg_to_ucs2(int idx, ucs2_t *buf, size_t buf_len) {
     return;
   }
   utf8_to_ucs2(g_socket_slot.req.args[idx], buf, buf_len);
+}
+
+/*
+ * Writes a string value to a GRI FString field at the given offset.
+ * If the new value fits within the existing FString buffer (new_num <= Max),
+ * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
+ * and swapped in. The old buffer is intentionally leaked since thre's no
+ * safe way to free Unreal's heap allocations from outside the engine.
+ */
+static int gri_set_str(int offset, const char *value) {
+  void *gri = find_gri();
+  if (!gri) {
+    hook_socket_finish_err("GRI not found");
+    return 0;
+  }
+
+  ucs2_t new_val[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(value, new_val, ARG_MAX_CHARS);
+
+  int new_len = 0;
+  while (new_val[new_len])
+    new_len++;
+  int new_num = new_len + 1;
+
+  FString *fstr = (FString *)((uint8_t *)gri + offset);
+  hook_log_debug("gri_set_str: field=+0x%x Data=%p Num=%d Max=%d new_num=%d\n",
+                 offset, (void *)fstr->Data, fstr->Num, fstr->Max, new_num);
+
+  if (fstr->Max > 0 && new_num <= fstr->Max) {
+    memcpy(fstr->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
+    fstr->Num = new_num;
+    hook_log_debug("gri_set_str: wrote in-place\n");
+  } else {
+    FString tmp = {0};
+    FString_ctor(&tmp, new_val);
+    fstr->Data = tmp.Data;
+    fstr->Num = tmp.Num;
+    fstr->Max = tmp.Max;
+
+    hook_log_debug("gri_set_str: allocated new buffer (old buffer leaked)\n");
+  }
+  return 1;
+}
+
+/*
+ * Writes an integer value to a GRI int field at the given offset.
+ * value is a decimal string converted afterward.
+ */
+static int gri_set_int(int offset, const char *value) {
+  void *gri = find_gri();
+  if (!gri) {
+    hook_socket_finish_err("GRI not found");
+    return 0;
+  }
+
+  int v = (int)strtol(value, NULL, 10);
+  *(int *)((uint8_t *)gri + offset) = v;
+
+  hook_log_debug("gri_set_int: field=+0x%x value=%d\n", offset, v);
+  return 1;
 }
 
 // ============================================================================
@@ -103,6 +164,157 @@ static void cmd_say(void *game_info) {
   FString_dtor(&fmsg);
 
   hook_log_debug("Say: '%s'\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
+// COMMAND - SERVER INFO
+// ============================================================================
+void cmd_get_server_info(void) {
+  void *gri = find_gri();
+  if (!gri) {
+    hook_socket_finish_err("GRI not found");
+    return;
+  }
+
+  char tmp[ARG_MAX_CHARS];
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{");
+
+  // String fields
+  static const struct {
+    const char *key;
+    int offset;
+  } str_fields[] = {
+      {"server_name", GRI_OFFSET_ServerName},
+      {"short_name", GRI_OFFSET_ShortName},
+      {"admin_name", GRI_OFFSET_AdminName},
+      {"admin_email", GRI_OFFSET_AdminEmail},
+      {"motd", GRI_OFFSET_MessageOfTheDay},
+  };
+  for (int i = 0; i < 5; i++) {
+    if (i > 0)
+      jb_raw(&jb, ",");
+
+    FString *fs = (FString *)((uint8_t *)gri + str_fields[i].offset);
+    jb_str(&jb, str_fields[i].key);
+    jb_raw(&jb, ":");
+
+    if (fs->Data && fs->Num > 0) {
+      ucs2_to_utf8(fs->Data, tmp, sizeof(tmp));
+      jb_str(&jb, tmp);
+    } else {
+      jb_raw(&jb, "\"\"");
+    }
+  }
+
+  // Int field
+  jb_raw(&jb, ",");
+  jb_str(&jb, "server_region");
+  jb_raw(&jb, ":");
+  jb_int(&jb, *(int *)((uint8_t *)gri + GRI_OFFSET_ServerRegion));
+
+  // Byte fields
+  jb_raw(&jb, ",\"base_difficulty\":");
+  jb_int(&jb, *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_BaseDifficulty));
+  jb_raw(&jb, ",\"final_wave\":");
+  jb_int(&jb, *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_FinalWave));
+
+  // Float field
+  jb_raw(&jb, ",\"game_diff\":");
+  float gd = *(float *)((uint8_t *)gri + GRI_OFFSET_GameDiff);
+  char fbuf[32];
+  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
+  jb_raw(&jb, fbuf);
+
+  jb_raw(&jb, "}}");
+
+  // TODO: lOG
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Sets the server name shown in the server browser.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_server_name(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: ServerName");
+    return;
+  }
+  if (!gri_set_str(GRI_OFFSET_ServerName, g_socket_slot.req.args[0]))
+    return;
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets the server short name.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_short_name(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: ShortName");
+    return;
+  }
+  if (!gri_set_str(GRI_OFFSET_ShortName, g_socket_slot.req.args[0]))
+    return;
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets the admin name shown in the server browser.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_admin_name(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: AdminName");
+    return;
+  }
+  if (!gri_set_str(GRI_OFFSET_AdminName, g_socket_slot.req.args[0]))
+    return;
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets the admin email shown in the server browser.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_admin_email(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: AdminEmail");
+    return;
+  }
+  if (!gri_set_str(GRI_OFFSET_AdminEmail, g_socket_slot.req.args[0]))
+    return;
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets the server region.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_server_region(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Region");
+    return;
+  }
+  if (!gri_set_int(GRI_OFFSET_ServerRegion, g_socket_slot.req.args[0]))
+    return;
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets the message of the day shown on the server.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_motd(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: MessageOfTheDay");
+    return;
+  }
+  if (!gri_set_str(GRI_OFFSET_MessageOfTheDay, g_socket_slot.req.args[0]))
+    return;
   hook_socket_finish_ok();
 }
 
@@ -194,9 +406,57 @@ void hook_command_dispatch(void) {
     return;
   }
 
+  // ServerInfo - Get Server Info
+  if (strcmp(cmd, "ServerInfo") == 0) {
+    cmd_get_server_info();
+    return;
+  }
+
   // WaveState - Get Wave State
   if (strcmp(cmd, "WaveState") == 0) {
     cmd_get_wave_state();
+    return;
+  }
+
+  // SetLiveServerName - Set Server Name
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveServerName") == 0) {
+    cmd_set_live_server_name();
+    return;
+  }
+
+  // SetLiveShortName - Set Short Server Name
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveShortName") == 0) {
+    cmd_set_live_short_name();
+    return;
+  }
+
+  // SetLiveAdminName - Set Admin Name
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveAdminName") == 0) {
+    cmd_set_live_admin_name();
+    return;
+  }
+
+  // SetLiveAdminMail - Set Admin Mail
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveAdminMail") == 0) {
+    cmd_set_live_admin_email();
+    return;
+  }
+
+  // SetLiveServerRegion - Set Server Region
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveServerRegion") == 0) {
+    cmd_set_live_server_region();
+    return;
+  }
+
+  // SetLiveMOTD - Set Message of the Day
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveMOTD") == 0) {
+    cmd_set_live_motd();
     return;
   }
 
