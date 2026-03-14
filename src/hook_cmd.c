@@ -30,6 +30,19 @@ static void arg_to_ucs2(int idx, ucs2_t *buf, size_t buf_len) {
 }
 
 /*
+ * Read a FURL FString field from ULevel into a UTF-8 buffer.
+ * Writes empty string if null or empty.
+ */
+static void furl_get_utf8(void *level, int offset, char *dst, size_t dst_len) {
+  FString *fs = (FString *)((uint8_t *)level + offset);
+  if (!fs->Data || fs->Num <= 0) {
+    dst[0] = '\0';
+    return;
+  }
+  ucs2_to_utf8(fs->Data, dst, dst_len);
+}
+
+/*
  * Writes a string value to a GRI FString field at the given offset.
  * If the new value fits within the existing FString buffer (new_num <= Max),
  * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
@@ -234,6 +247,69 @@ void cmd_get_server_info(void) {
   hook_socket_finish_json(&jb);
 }
 
+static void cmd_get_level_url(void) {
+  void *level = *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  if (!level) {
+    hook_socket_finish_err("level not ready");
+    return;
+  }
+
+  char tmp[ARG_MAX_CHARS];
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{");
+
+  jb_raw(&jb, "\"protocol\":");
+  furl_get_utf8(level, FURL_OFFSET_Protocol, tmp, sizeof(tmp));
+  jb_str(&jb, tmp);
+
+  jb_raw(&jb, ",\"host\":");
+  furl_get_utf8(level, FURL_OFFSET_Host, tmp, sizeof(tmp));
+  jb_str(&jb, tmp);
+
+  jb_raw(&jb, ",\"port\":");
+  jb_int(&jb, *(int *)((uint8_t *)level + FURL_OFFSET_Port));
+
+  jb_raw(&jb, ",\"map\":");
+  furl_get_utf8(level, FURL_OFFSET_Map, tmp, sizeof(tmp));
+  jb_str(&jb, tmp);
+
+  jb_raw(&jb, ",\"portal\":");
+  furl_get_utf8(level, FURL_OFFSET_Portal, tmp, sizeof(tmp));
+  jb_str(&jb, tmp);
+
+  jb_raw(&jb, ",\"valid\":");
+  jb_bool(&jb, *(int *)((uint8_t *)level + FURL_OFFSET_Valid));
+
+  // Options
+  FString *op_array = (FString *)((uint8_t *)level + FURL_OFFSET_Op);
+  int op_num = op_array->Num;
+  FString *op_data = (FString *)op_array->Data;
+
+  jb_raw(&jb, ",\"options\":[");
+  if (op_data && op_num > 0) {
+    char tmp[ARG_MAX_CHARS];
+    int first = 1;
+    for (int i = 0; i < op_num; i++) {
+      FString *entry = &op_data[i];
+      if (!entry->Data || entry->Num <= 0)
+        continue;
+      if (!first)
+        jb_raw(&jb, ",");
+      first = 0;
+      ucs2_to_utf8(entry->Data, tmp, sizeof(tmp));
+      jb_str(&jb, tmp);
+    }
+  }
+  jb_raw(&jb, "]");
+  //
+
+  jb_raw(&jb, "}}");
+
+  // TODO: LOG
+  hook_socket_finish_json(&jb);
+}
+
 /*
  * Sets the server name shown in the server browser.
  * Change is lost on map change.
@@ -409,6 +485,12 @@ void hook_command_dispatch(void) {
   // ServerInfo - Get Server Info
   if (strcmp(cmd, "ServerInfo") == 0) {
     cmd_get_server_info();
+    return;
+  }
+
+  // LevelURL - Get Level URL with options
+  if (strcmp(cmd, "LevelURL") == 0) {
+    cmd_get_level_url();
     return;
   }
 

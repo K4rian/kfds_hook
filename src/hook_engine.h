@@ -11,23 +11,23 @@
 #define ADDR_UGameEngine_Tick 0x08143866
 #define ADDR_UGameEngine_Exec 0x08129874
 
-#define ADDR_ULevel_GetLevelInfo 0x080de61a
+#define ADDR_ULevel_GetLevelInfo          0x080de61a
 #define ADDR_ALevelInfo_eventServerTravel 0x08146612
-#define ADDR_AGameInfo_eventBroadcast 0x081468d8
+#define ADDR_AGameInfo_eventBroadcast     0x081468d8
 
 /*
  * FString memory management
  * Confirmed: eventBroadcast @0x8129eec
  */
 #define ADDR_FString_ctor_wchar 0x0804e1fe
-#define ADDR_FString_dtor 0x0804e4a6
+#define ADDR_FString_dtor       0x0804e4a6
 
 /*
  * GLog: FOutputDevice* passed to UGameEngine::Exec as output device
  * GNull: null FOutputDevice*, suppresses all output
  */
 #define ADDR_GNULL_PTR 0x0878b7e8
-#define ADDR_GLOG_PTR 0x0878b7e0
+#define ADDR_GLOG_PTR  0x0878b7e0
 
 // ============================================================================
 // ENGINE STRUCT OFFSETS
@@ -41,7 +41,28 @@
  *           Confirmed: Tick @0x8143b5a
  */
 #define UGAMEENGINE_PENDING_LEVEL_OFFSET 0x034
-#define UGAMEENGINE_LEVEL_OFFSET 0x114
+#define UGAMEENGINE_LEVEL_OFFSET         0x114
+
+/*
+ * FURL
+ *   ULevel+0x48
+ *   Confirmed: execGetLocalURL @0x8262202
+ *              execGetAddressURL @0x8262481
+ *   +0x48  Protocol  FString
+ *   +0x54  Host      FString
+ *   +0x60  Port      int
+ *   +0x64  Map       FString
+ *   +0x70  Op        TArray<FString> (options: "Game=...", "Mutator=...", etc.)
+ *   +0x7c  Portal    FString
+ *   +0x88  Valid     int (1=parsed OK)
+ */
+#define FURL_OFFSET_Protocol 0x48
+#define FURL_OFFSET_Host     0x54
+#define FURL_OFFSET_Port     0x60
+#define FURL_OFFSET_Map      0x64
+#define FURL_OFFSET_Op       0x70
+#define FURL_OFFSET_Portal   0x7c
+#define FURL_OFFSET_Valid    0x88
 
 /*
  * ALevelInfo
@@ -67,19 +88,19 @@
  *   +0x5fc  bWaveInProgress  bool  (1=wave active, 0=trader/lobby)
  *   +0x678  GameDiff         float (replication of BaseDifficulty)
  */
-#define GRI_OFFSET_ServerName       0x3fc
-#define GRI_OFFSET_ShortName        0x408
-#define GRI_OFFSET_AdminName        0x414
-#define GRI_OFFSET_AdminEmail       0x420
-#define GRI_OFFSET_ServerRegion     0x42c
-#define GRI_OFFSET_MessageOfTheDay  0x430
-#define GRI_OFFSET_WaveNumber       0x5c8
-#define GRI_OFFSET_BaseDifficulty   0x5c9
-#define GRI_OFFSET_FinalWave        0x5ca
-#define GRI_OFFSET_numMonsters      0x5cc
-#define GRI_OFFSET_TimeToNextWave   0x5f8
-#define GRI_OFFSET_bWaveInProgress  0x5fc
-#define GRI_OFFSET_GameDiff         0x678
+#define GRI_OFFSET_ServerName      0x3fc
+#define GRI_OFFSET_ShortName       0x408
+#define GRI_OFFSET_AdminName       0x414
+#define GRI_OFFSET_AdminEmail      0x420
+#define GRI_OFFSET_ServerRegion    0x42c
+#define GRI_OFFSET_MessageOfTheDay 0x430
+#define GRI_OFFSET_WaveNumber      0x5c8
+#define GRI_OFFSET_BaseDifficulty  0x5c9
+#define GRI_OFFSET_FinalWave       0x5ca
+#define GRI_OFFSET_numMonsters     0x5cc
+#define GRI_OFFSET_TimeToNextWave  0x5f8
+#define GRI_OFFSET_bWaveInProgress 0x5fc
+#define GRI_OFFSET_GameDiff        0x678
 
 /*
  * APlayerController
