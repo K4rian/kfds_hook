@@ -103,7 +103,7 @@ static int gri_set_int(int offset, const char *value) {
 }
 
 // ============================================================================
-// COMMMAND - PING
+// PING
 // ============================================================================
 static void cmd_ping(void) {
   json_buf_t jb;
@@ -116,7 +116,7 @@ static void cmd_ping(void) {
 }
 
 // ============================================================================
-// COMMAND - CONSOLE
+// CONSOLE
 // ============================================================================
 static void cmd_exec(void) {
   // At least one command must be given
@@ -136,7 +136,7 @@ static void cmd_exec(void) {
 }
 
 // ============================================================================
-// COMMAND - MAP CHANGE
+// MAP CHANGE (TRAVEL)
 // ============================================================================
 static void cmd_server_travel(void *level_info) {
   // Can't change on an empty map URL
@@ -158,7 +158,7 @@ static void cmd_server_travel(void *level_info) {
 }
 
 // ============================================================================
-// COMMAND - ADMIN SERVER MESSAGE
+// ADMIN SERVER MESSAGE
 // ============================================================================
 static void cmd_say(void *game_info) {
   // Can't say anything if there's nothing to say
@@ -181,7 +181,7 @@ static void cmd_say(void *game_info) {
 }
 
 // ============================================================================
-// COMMAND - SERVER INFO
+// SERVER INFO
 // ============================================================================
 void cmd_get_server_info(void) {
   void *gri = find_gri();
@@ -311,6 +311,9 @@ static void cmd_get_level_url(void) {
   hook_socket_finish_json(&jb);
 }
 
+// ============================================================================
+// LIVE
+// ============================================================================
 /*
  * Sets the server name shown in the server browser.
  * Change is lost on map change.
@@ -395,8 +398,116 @@ static void cmd_set_live_motd(void) {
   hook_socket_finish_ok();
 }
 
+/*
+ * Sets the game difficulty and syncs both GRI fields:
+ * BaseDifficulty (UI display) and GameDiff (tab overlay, cosmetic).
+ * Effect is immediate and per-spawn: GameDifficulty is reads each time a new
+ * monster is spawned to calculate stats. Already-spawned zeds are not
+ * retroactively affected. Already-connected players may not see the UI change
+ * right away, they need to relog or wait for the next match.
+ * This is a client-side replication issue, visual only.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_game_difficulty(void *game_info) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Difficulty");
+    return;
+  }
+
+  float new_diff = strtof(g_socket_slot.req.args[0], NULL);
+  // if (new_diff != 1.0f && new_diff != 2.0f && new_diff != 4.0f &&
+  //     new_diff != 5.0f && new_diff != 7.0f) {
+  //   hook_socket_finish_err(
+  //       "invalid difficulty value");
+  //   return;
+  // }
+
+  // Read and write GameDifficulty via memcpy to avoid strict aliasing UB
+  uint8_t *ptr = (uint8_t *)game_info + GAMETYPE_OFFSET_GameDifficulty;
+  float old_diff;
+  memcpy(&old_diff, ptr, sizeof(old_diff));
+  memcpy(ptr, &new_diff, sizeof(new_diff));
+
+  hook_log_debug("SetLiveGameDifficulty: %.6g -> %.6g\n", (double)old_diff,
+                 (double)new_diff);
+
+  // Sync GRI fields so the UI stays consistent.
+  // find_gri() may return NULL during a level transition
+  void *gri = find_gri();
+  if (gri) {
+    // BaseDifficulty drives the difficulty string and wave counter
+    // display in the lobby and scoreboard. Written as a single byte
+    uint8_t new_base_diff = (uint8_t)(int)new_diff;
+    *((uint8_t *)gri + GRI_OFFSET_BaseDifficulty) = new_base_diff;
+    hook_log_debug(
+        "SetLiveGameDifficulty: GRI+0x5c9 (BaseDifficulty) synced to %d\n",
+        (int)new_base_diff);
+
+    // GameDiff (float), cosmetic copy, drives tab overlay difficulty name
+    memcpy((uint8_t *)gri + GRI_OFFSET_GameDiff, &new_diff, sizeof(new_diff));
+    hook_log_debug(
+        "SetLiveGameDifficulty: GRI+0x678 (GameDiff) synced to %.6g\n",
+        (double)new_diff);
+  } else {
+    hook_log_debug("SetLiveGameDifficulty: GRI not found, "
+                   "BaseDifficulty and GameDiff not updated\n");
+  }
+
+  char old_str[32], new_str[32];
+  snprintf(old_str, sizeof(old_str), "%.6g", (double)old_diff);
+  snprintf(new_str, sizeof(new_str), "%.6g", (double)new_diff);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"old\":");
+  jb_raw(&jb, old_str);
+  jb_raw(&jb, ",\"new\":");
+  jb_raw(&jb, new_str);
+  jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Sets the maximum number of players allowed on the server.
+ * Effect is immediate: the engine checks MaxPlayers on each new connection
+ * attempt, so new joins are capped at the updated value right away.
+ * Already-connected players are not kicked.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_max_players(void *game_info) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: MaxPlayers");
+    return;
+  }
+
+  // Let's be EXTRA generous here
+  int new_max = (int)strtol(g_socket_slot.req.args[0], NULL, 10);
+  if (new_max < 1 || new_max > 32) {
+    hook_socket_finish_err("MaxPlayers must be between 1 and 32");
+    return;
+  }
+
+  uint8_t *ptr = (uint8_t *)game_info + GAMETYPE_OFFSET_MaxPlayers;
+  int old_max;
+  memcpy(&old_max, ptr, sizeof(old_max));
+  memcpy(ptr, &new_max, sizeof(new_max));
+
+  hook_log_debug("SetLiveMaxPlayers: %d -> %d\n", old_max, new_max);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"old\":");
+  jb_int(&jb, old_max);
+  jb_raw(&jb, ",\"new\":");
+  jb_int(&jb, new_max);
+  jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
 // ============================================================================
-// COMMAND - WAVE STATE
+// WAVE STATE
 // ============================================================================
 static void cmd_get_wave_state(void) {
   void *gri = find_gri();
@@ -441,7 +552,7 @@ static void cmd_get_wave_state(void) {
 }
 
 // ============================================================================
-// COMMAND - SKIP TRADER
+// SKIP TRADER
 // ============================================================================
 /*
  * Forces trader countdown to 6 seconds.
@@ -452,8 +563,7 @@ static void cmd_get_wave_state(void) {
  * behavior.
  */
 static void cmd_skip_trader(void *game_info) {
-  int wip = 
-        *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bWaveInProgress);
+  int wip = *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bWaveInProgress);
   int doorsopen =
       *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bTradingDoorsOpen);
   if (wip || !doorsopen) {
@@ -579,6 +689,20 @@ void hook_command_dispatch(void) {
   // Do not survive a map change
   if (strcmp(cmd, "SetLiveMOTD") == 0) {
     cmd_set_live_motd();
+    return;
+  }
+
+  // SetLiveGameDifficulty - Set Game Difficulty
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveGameDifficulty") == 0) {
+    cmd_set_live_game_difficulty(game_info);
+    return;
+  }
+
+  // SetLiveMaxPlayer - Set Max Players
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveMaxPlayer") == 0) {
+    cmd_set_live_max_players(game_info);
     return;
   }
 
