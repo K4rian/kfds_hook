@@ -241,3 +241,50 @@ void *find_gri(void) {
   }
   return NULL;
 }
+
+/*
+ * Find the AccessControl actor by scanning for an object whose name contains
+ * "AccessControl".
+ * AccessControl -> Info -> Actor, so it lives in the actor
+ * list alongside GRI. Typically only one instance exists per level. 
+ * Scan by name rather than following GameInfo+offset to avoid needing 
+ * a confirmed offset for the AccessControl* field on GameInfo.
+ */
+void *find_access_control(void) {
+  void *engine = hook_engine_get();
+  if (!engine)
+    return NULL;
+
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  if (!level)
+    return NULL;
+
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+  
+    const ucs2_t *name = UObject_GetName(actor);
+    if (!name)
+      continue;
+  
+    // Match "AccessControl"
+    // 13 chars, check length first
+    int len = 0;
+    while (name[len])
+      len++;
+    if (len < 13)
+      continue;
+  
+    for (int j = 0; j <= len - 13; j++)
+      if (name[j] == 'A' && name[j + 1] == 'c' && name[j + 2] == 'c' &&
+          name[j + 3] == 'e' && name[j + 4] == 's' && name[j + 5] == 's' &&
+          name[j + 6] == 'C' && name[j + 7] == 'o' && name[j + 8] == 'n' &&
+          name[j + 9] == 't' && name[j + 10] == 'r' && name[j + 11] == 'o' &&
+          name[j + 12] == 'l')
+        return actor;
+  }
+  return NULL;
+}

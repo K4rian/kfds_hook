@@ -50,7 +50,7 @@ static void furl_get_utf8(void *level, int offset, char *dst, size_t dst_len) {
  * Writes a string value to a GRI FString field at the given offset.
  * If the new value fits within the existing FString buffer (new_num <= Max),
  * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
- * and swapped in. The old buffer is intentionally leaked since thre's no
+ * and swapped in. The old buffer is intentionally leaked since there's no
  * safe way to free Unreal's heap allocations from outside the engine.
  */
 static int gri_set_str(int offset, const char *value) {
@@ -699,9 +699,9 @@ static void cmd_kill_zeds(void) {
     if (health <= 0)
       continue;
 
-    // Call through the normal death path: 
-    // fires Died(), death animation, ragdoll, and proper actor cleanup. 
-    // Damage of 100000 ensures death regardless of difficulty or monster HP. 
+    // Call through the normal death path:
+    // fires Died(), death animation, ragdoll, and proper actor cleanup.
+    // Damage of 100000 ensures death regardless of difficulty or monster HP.
     // NULL instigator and damage type are safe.
     AActor_eventTakeDamage(actor, 100000,    // damage
                            NULL,             // instigator APawn
@@ -719,6 +719,57 @@ static void cmd_kill_zeds(void) {
   jb_raw(&jb, "{\"ok\":true,\"d\":{\"killed\":");
   jb_int(&jb, killed);
   jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
+// ACCESS CONTROL
+// ============================================================================
+/*
+ * Reads the live GamePassword from AccessControl.
+ * Returns empty string if the password is not set.
+ */
+static void cmd_get_game_password(void) {
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_GamePassword);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  if (fs->Data && fs->Num > 0)
+    jb_ucs2(&jb, fs->Data);
+  else
+    jb_raw(&jb, "\"\"");
+  jb_raw(&jb, "}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Reads the live AdminPassword from AccessControl.
+ * Returns empty string if the password is not set.
+ */
+static void cmd_get_admin_password(void) {
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_AdminPassword);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  if (fs->Data && fs->Num > 0)
+    jb_ucs2(&jb, fs->Data);
+  else
+    jb_raw(&jb, "\"\"");
+  jb_raw(&jb, "}");
 
   hook_socket_finish_json(&jb);
 }
@@ -918,6 +969,53 @@ static void cmd_set_live_max_players(void *game_info) {
   hook_socket_finish_json(&jb);
 }
 
+/*
+ * Sets a new game password.
+ * If the new value fits within the existing FString buffer (new_num <= Max),
+ * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
+ * and swapped in. The old buffer is intentionally leaked.
+ * Effect is immediate, change is lost on map change.
+ */
+static void cmd_set_live_game_password(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Password");
+    return;
+  }
+
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  ucs2_t new_val[ARG_MAX_CHARS] = {0};
+  arg_to_ucs2(0, new_val, ARG_MAX_CHARS);
+
+  int new_len = 0;
+  while (new_val[new_len])
+    new_len++;
+  int new_num = new_len + 1; // include NT
+
+  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_GamePassword);
+  hook_log_debug("SetLiveGamePassword: Data=%p Num=%d Max=%d new_num=%d\n",
+                 (void *)fs->Data, fs->Num, fs->Max, new_num);
+
+  if (fs->Max > 0 && new_num <= fs->Max) {
+    memcpy(fs->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
+    fs->Num = new_num;
+    hook_log_debug("SetLiveGamePassword: wrote in-place\n");
+  } else {
+    FString tmp = {0};
+    FString_ctor(&tmp, new_val);
+    fs->Data = tmp.Data;
+    fs->Num = tmp.Num;
+    fs->Max = tmp.Max;
+    hook_log_debug("SetLiveGamePassword: allocated new buffer (old leaked)\n");
+  }
+
+  hook_socket_finish_ok();
+}
+
 // ============================================================================
 // WAVE STATE
 // ============================================================================
@@ -1100,6 +1198,18 @@ void hook_command_dispatch(void) {
     return;
   }
 
+  // GamePassword - Get the current game's password
+  if (strcmp(cmd, "GamePassword") == 0) {
+    cmd_get_game_password();
+    return;
+  }
+
+  // AdminPassword - Get the current admin's password
+  if (strcmp(cmd, "AdminPassword") == 0) {
+    cmd_get_admin_password();
+    return;
+  }
+
   // --------------------------------------------------------------------------
 
   // SetLiveServerName - Set Server Name
@@ -1155,6 +1265,13 @@ void hook_command_dispatch(void) {
   // Do not survive a map change
   if (strcmp(cmd, "SetLiveMaxPlayer") == 0) {
     cmd_set_live_max_players(game_info);
+    return;
+  }
+
+  // SetLiveGamePassword - Set Game Password
+  // Do not survive a map change
+  if (strcmp(cmd, "SetLiveGamePassword") == 0) {
+    cmd_set_live_game_password();
     return;
   }
 

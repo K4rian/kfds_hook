@@ -185,6 +185,18 @@
 #define GAMETYPE_OFFSET_bWaveInProgress   0x157c
 
 /*
+ * AccessControl
+ *   +0x3ec  IPPolicies     TArray<FString>
+ *   +0x460  AdminPassword  FString
+ *   +0x46c  GamePassword   FString
+ *   +0x480  BannedIDs      TArray<FString>
+ */
+#define ACCESSCONTROL_OFFSET_IPPolicies    0x3ec
+#define ACCESSCONTROL_OFFSET_AdminPassword 0x460
+#define ACCESSCONTROL_OFFSET_GamePassword  0x46c
+#define ACCESSCONTROL_OFFSET_BannedIDs     0x480
+
+/*
  * FName indices for AGameInfo::eventBroadcast and
  * APlayerController::eventClientMessage message type routing.
  * Controls chat channel styling (color, format, display size).
@@ -300,6 +312,7 @@ int is_player_controller(const ucs2_t *name);
 int is_zed_actor(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
 void *find_gri(void);
+void *find_access_control(void);
 
 // clang-format on
 #endif /* HOOK_ENGINE_H */
