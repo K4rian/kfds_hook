@@ -616,6 +616,114 @@ static void cmd_send_player_message(void) {
 }
 
 // ============================================================================
+// ZEDS
+// ============================================================================
+/*
+ * Returns all living zeds in the current wave.
+ * Traverses the actor list and filters for actors whose class name starts with
+ * "Zombie". Dead zeds (Health <= 0) are excluded.
+ * Fields per zed:
+ *   "class"  -> class name with "Zombie" prefix stripped (e.g. "Clot", "Boss")
+ *   "health" -> current HP (int, always > 0)
+ */
+static void cmd_get_zeds(void) {
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":[");
+  int first = 1;
+
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+
+    const ucs2_t *name = UObject_GetName(actor);
+    if (!is_zed_actor(name))
+      continue;
+
+    int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
+    if (health <= 0)
+      continue;
+
+    // Strip "Zombie" prefix (6 chars) for a cleaner class name
+    char class_buf[64] = "";
+    const ucs2_t *src = name + 6;
+    int j = 0;
+    // Skip trailing _NNN instance suffix (e.g. "Clot_12" → "Clot") */
+    while (src[j] && src[j] != '_' && j < 63) {
+      class_buf[j] = (char)src[j];
+      j++;
+    }
+    class_buf[j] = '\0';
+
+    if (!first)
+      jb_raw(&jb, ",");
+    first = 0;
+    jb_raw(&jb, "{\"class\":");
+    jb_str(&jb, class_buf);
+    jb_raw(&jb, ",\"health\":");
+    jb_int(&jb, health);
+    jb_raw(&jb, "}");
+  }
+  jb_raw(&jb, "]}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Instantly kills all living zeds in the current wave.
+ * Same actor traversal as cmd_get_zeds. Sets Health to 0 on every living
+ * monster actor. The engine's death event fires naturally on the next tick
+ * (the hook does not need to call it explicitly).
+ */
+static void cmd_kill_zeds(void) {
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+
+  int killed = 0;
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+    if (!is_zed_actor(UObject_GetName(actor)))
+      continue;
+
+    int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
+    if (health <= 0)
+      continue;
+
+    // Call through the normal death path: 
+    // fires Died(), death animation, ragdoll, and proper actor cleanup. 
+    // Damage of 100000 ensures death regardless of difficulty or monster HP. 
+    // NULL instigator and damage type are safe.
+    AActor_eventTakeDamage(actor, 100000,    // damage
+                           NULL,             // instigator APawn
+                           0.0f, 0.0f, 0.0f, // HitLocation FVector
+                           0.0f, 0.0f, 0.0f, // Momentum FVector
+                           NULL,             // DamageType UClass*
+                           0);               // extra
+    killed++;
+  }
+
+  hook_log_debug("KillZeds: killed %d zed(s)\n", killed);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"killed\":");
+  jb_int(&jb, killed);
+  jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
 // LIVE
 // ============================================================================
 /*
@@ -977,6 +1085,18 @@ void hook_command_dispatch(void) {
   // SendPlayerMessage - Send a message to a connected player
   if (strcmp(cmd, "SendPlayerMessage") == 0) {
     cmd_send_player_message();
+    return;
+  }
+
+  // Zeds - List all living Zeds in the current wave
+  if (strcmp(cmd, "Zeds") == 0) {
+    cmd_get_zeds();
+    return;
+  }
+
+  // KillZeds - Kill all living Zeds in the current wave
+  if (strcmp(cmd, "KillZeds") == 0) {
+    cmd_kill_zeds();
     return;
   }
 

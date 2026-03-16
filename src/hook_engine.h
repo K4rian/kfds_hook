@@ -246,6 +246,14 @@ typedef void (*AGameInfo_eventBroadcast_fn)(void *, void *, const FString *,
                                             FName);
 typedef void (*AGameInfo_eventKickIdler_fn)(void *, void *);
 
+typedef void (*AActor_eventTakeDamage_fn)(void*  self,
+                                          int    damage,
+                                          void*  instigator,
+                                          float  hlx, float hly, float hlz,
+                                          float  mx,  float my,  float mz,
+                                          void*  damage_type,
+                                          int    extra);
+
 typedef void (*APlayerController_eventClientMessage_fn)(void *, 
                                                        FString const *, FName);
 typedef void *(*Cast_APlayerController_fn)(void *);
@@ -268,6 +276,8 @@ extern ALevelInfo_eventServerTravel_fn ALevelInfo_eventServerTravel;
 extern AGameInfo_eventBroadcast_fn AGameInfo_eventBroadcast;
 extern AGameInfo_eventKickIdler_fn AGameInfo_eventKickIdler;
 
+extern AActor_eventTakeDamage_fn AActor_eventTakeDamage;
+
 extern APlayerController_eventClientMessage_fn
     APlayerController_eventClientMessage;
 extern Cast_APlayerController_fn Cast_APlayerController;
@@ -287,6 +297,7 @@ void *hook_engine_get(void);
 int is_server_busy(void);
 int is_game_started(void);
 int is_player_controller(const ucs2_t *name);
+int is_zed_actor(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
 void *find_gri(void);
 

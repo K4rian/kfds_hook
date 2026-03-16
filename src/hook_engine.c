@@ -45,6 +45,9 @@ AGameInfo_eventBroadcast_fn AGameInfo_eventBroadcast =
 AGameInfo_eventKickIdler_fn AGameInfo_eventKickIdler =
     (AGameInfo_eventKickIdler_fn)ADDR_AGameInfo_eventKickIdler;
 
+AActor_eventTakeDamage_fn AActor_eventTakeDamage =
+    (AActor_eventTakeDamage_fn)ADDR_AActor_eventTakeDamage;
+
 APlayerController_eventClientMessage_fn APlayerController_eventClientMessage =
     (APlayerController_eventClientMessage_fn)
         ADDR_APlayerController_eventClientMessage;
@@ -158,6 +161,25 @@ int is_player_controller(const ucs2_t *name) {
       return 1;
   }
   return 0;
+}
+
+/* Returns 1 if the actor class name starts with "Zombie" and is not a
+ * non-pawn map actor. KF monster classes are all named Zombie*, but so are
+ * ZombiePathNode and ZombieVolume actors placed by the mapper -> exclude them.
+ */
+int is_zed_actor(const ucs2_t *name) {
+  if (!name)
+    return 0;
+  if (!(name[0] == 'Z' && name[1] == 'o' && name[2] == 'm' && name[3] == 'b' &&
+        name[4] == 'i' && name[5] == 'e'))
+    return 0;
+  // Exclude ZombiePathNode
+  if (name[6] == 'P' && name[7] == 'a' && name[8] == 't' && name[9] == 'h')
+    return 0;
+  // Exclude ZombieVolume
+  if (name[6] == 'V' && name[7] == 'o' && name[8] == 'l' && name[9] == 'u')
+    return 0;
+  return 1;
 }
 
 /*
