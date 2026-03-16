@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +21,9 @@
 // ============================================================================
 // COMMAND DEFINES
 // ============================================================================
-#define CFG_BUF_CHARS 1024 // max config value / section / key (UTF-8)
-#define CFG_DEL_SEC_BUF (CFG_BUF_CHARS * 4)
-#define CFG_DEL_MAX_ENTRIES 512
+#define CFG_BUF_CHARS        1024 // max config value / section / key (UTF-8)
+#define CFG_DEL_SEC_BUF      (CFG_BUF_CHARS * 4)
+#define CFG_DEL_MAX_ENTRIES  512
 
 // ============================================================================
 // COMMAND HELPERS
@@ -1254,6 +1255,138 @@ static void cmd_cfg_get_str(void) {
 }
 
 /*
+ * Retrieves an integer value from GConfig.
+ * Args: Section, Key [, File]
+ */
+static void cmd_cfg_get_int(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: Section, Key [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
+    arg_to_ucs2(2, file, 256);
+    fp = file;
+  }
+
+  int out = 0;
+  if (!GConfig_GetInt(gcfg, sec, key, &out, fp)) {
+    hook_socket_finish_err("not found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_int(&jb, out);
+  jb_raw(&jb, "}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Retrieves a float value from GConfig.
+ * Args: Section, Key [, File]
+ */
+static void cmd_cfg_get_float(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: Section, Key [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
+    arg_to_ucs2(2, file, 256);
+    fp = file;
+  }
+
+  float out = 0.0f;
+  if (!GConfig_GetFloat(gcfg, sec, key, &out, fp)) {
+    hook_socket_finish_err("not found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_float(&jb, out);
+  jb_raw(&jb, "}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Retrieves a boolean value from GConfig.
+ * Args: Section, Key [, File]
+ */
+static void cmd_cfg_get_bool(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: Section, Key [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
+    arg_to_ucs2(2, file, 256);
+    fp = file;
+  }
+
+  int out = 0;
+  if (!GConfig_GetBool(gcfg, sec, key, &out, fp)) {
+    hook_socket_finish_err("not found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_bool(&jb, out);
+  jb_raw(&jb, "}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
  * Sets a string value in GConfig.
  * Args:   Section, Key, Value [, File [, Unique]]
  * File    optional, empty string uses GConfig default.
@@ -1297,13 +1430,124 @@ static void cmd_cfg_set_str(void) {
 }
 
 /*
+ * Sets an integer value in GConfig.
+ * Args: Section, Key, Value [, File]
+ * Note: changes are in-memory only until CfgFlush is called.
+ */
+static void cmd_cfg_set_int(void) {
+  if (g_socket_slot.req.argc < 3) {
+    hook_socket_finish_err("args: Section, Key, Value [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
+    arg_to_ucs2(3, file, 256);
+    fp = file;
+  }
+
+  int v = (int)strtol(g_socket_slot.req.args[2], NULL, 10);
+  GConfig_SetInt(gcfg, sec, key, v, fp);
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets a float value in GConfig.
+ * Args: Section, Key, Value [, File]
+ * Note: changes are in-memory only until CfgFlush is called.
+ */
+static void cmd_cfg_set_float(void) {
+  if (g_socket_slot.req.argc < 3) {
+    hook_socket_finish_err("args: Section, Key, Value [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
+    arg_to_ucs2(3, file, 256);
+    fp = file;
+  }
+
+  float v = strtof(g_socket_slot.req.args[2], NULL);
+  GConfig_SetFloat(gcfg, sec, key, v, fp);
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sets a boolean value in GConfig.
+ * Args: Section, Key, Value [, File]
+ * Value: "1", "true", "True", "TRUE" = true, anything else = false.
+ * Note: changes are in-memory only until CfgFlush is called.
+ */
+static void cmd_cfg_set_bool(void) {
+  if (g_socket_slot.req.argc < 3) {
+    hook_socket_finish_err("args: Section, Key, Value [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
+    arg_to_ucs2(3, file, 256);
+    fp = file;
+  }
+
+  const char *b = g_socket_slot.req.args[2];
+  int v = (b[0] == '1' || strcmp(b, "true") == 0 || strcmp(b, "True") == 0 ||
+           strcmp(b, "TRUE") == 0);
+  GConfig_SetBool(gcfg, sec, key, v, fp);
+
+  hook_socket_finish_ok();
+}
+
+/*
  * Retrieves all key=value pairs from a GConfig section.
  * Args: Section [, File]
  * File: optionl, empty string uses GConfig default.
  * GConfig_GetSection returns a double-null-terminated flat buffer:
  *   "Key1=Val1\0Key2=Val2\0\0"
  * Parses it into a JSON array of strings.
- * Buffer size is CFG_BUF_CHARS*4 UCS-2 chars, 
+ * Buffer size is CFG_BUF_CHARS*4 UCS-2 chars,
  * very large sections may be truncated silently.
  */
 static void cmd_cfg_get_section(void) {
@@ -1360,7 +1604,7 @@ static void cmd_cfg_get_section(void) {
     if (!first)
       jb_raw(&jb, ",");
     first = 0;
-  
+
     jb_str(&jb, entry_utf8);
 
     ri++; // skip null separator
@@ -1402,13 +1646,25 @@ static void cmd_cfg_flush(void) {
 // COMMAND DISPATCHER
 // ============================================================================
 void hook_command_dispatch(void) {
-  const char *cmd = g_socket_slot.req.cmd;
+  char cmd[CMD_MAX_CHARS];
+  strncpy(cmd, g_socket_slot.req.cmd, sizeof(cmd) - 1);
+  cmd[sizeof(cmd) - 1] = '\0';
+  for (int i = 0; cmd[i]; i++)
+    cmd[i] = tolower((unsigned char)cmd[i]);
+
+#ifdef DEBUG
+  if (strncmp(cmd, "debug", 5) == 0) {
+    hook_debug_command_dispatch(cmd);
+    return;
+  }
+#endif
+
   hook_log_debug("Executing cmd: %s\n", cmd);
 
   // TODO: Dispatch table
 
   // Ping
-  if (strcmp(cmd, "Ping") == 0) {
+  if (strcmp(cmd, "ping") == 0) {
     cmd_ping();
     return;
   }
@@ -1424,103 +1680,103 @@ void hook_command_dispatch(void) {
   }
 
   // Exec - Console
-  if (strcmp(cmd, "Exec") == 0) {
+  if (strcmp(cmd, "exec") == 0) {
     cmd_exec();
     return;
   }
 
   // Server Travel - Map Change
-  if (strcmp(cmd, "ServerTravel") == 0) {
+  if (strcmp(cmd, "servertravel") == 0) {
     cmd_server_travel(level_info);
     return;
   }
 
   // Say - Admin Server Message
-  if (strcmp(cmd, "Say") == 0) {
+  if (strcmp(cmd, "say") == 0) {
     cmd_say(game_info);
     return;
   }
 
   // Announce - Admin Announcement
-  if (strcmp(cmd, "Announce") == 0) {
+  if (strcmp(cmd, "announce") == 0) {
     cmd_announce(game_info);
     return;
   }
 
   // ServerInfo - Get Server Info
-  if (strcmp(cmd, "ServerInfo") == 0) {
+  if (strcmp(cmd, "serverinfo") == 0) {
     cmd_get_server_info();
     return;
   }
 
   // LevelURL - Get Level URL with options
-  if (strcmp(cmd, "LevelURL") == 0) {
+  if (strcmp(cmd, "levelurl") == 0) {
     cmd_get_level_url();
     return;
   }
 
   // WaveState - Get Wave State
-  if (strcmp(cmd, "WaveState") == 0) {
+  if (strcmp(cmd, "wavestate") == 0) {
     cmd_get_wave_state();
     return;
   }
 
   // SkipTrader - Set Trader Countdown to 6s
-  if (strcmp(cmd, "SkipTrader") == 0) {
+  if (strcmp(cmd, "skiptrader") == 0) {
     cmd_skip_trader(game_info);
     return;
   }
 
   // Players - Get all connected players
-  if (strcmp(cmd, "Players") == 0) {
+  if (strcmp(cmd, "players") == 0) {
     cmd_get_players();
     return;
   }
 
   // Kick - Kick a player by SteamID64
-  if (strcmp(cmd, "Kick") == 0) {
+  if (strcmp(cmd, "kick") == 0) {
     cmd_kick(game_info);
     return;
   }
 
   // SendPlayerMessage - Send a message to a connected player
-  if (strcmp(cmd, "SendPlayerMessage") == 0) {
+  if (strcmp(cmd, "sendplayermessage") == 0) {
     cmd_send_player_message();
     return;
   }
 
   // Zeds - List all living Zeds in the current wave
-  if (strcmp(cmd, "Zeds") == 0) {
+  if (strcmp(cmd, "zeds") == 0) {
     cmd_get_zeds();
     return;
   }
 
   // KillZeds - Kill all living Zeds in the current wave
-  if (strcmp(cmd, "KillZeds") == 0) {
+  if (strcmp(cmd, "killzeds") == 0) {
     cmd_kill_zeds();
     return;
   }
 
   // GamePassword - Get the current game's password
-  if (strcmp(cmd, "GamePassword") == 0) {
+  if (strcmp(cmd, "gamepassword") == 0) {
     cmd_get_game_password();
     return;
   }
 
   // AdminPassword - Get the current admin's password
-  if (strcmp(cmd, "AdminPassword") == 0) {
+  if (strcmp(cmd, "adminpassword") == 0) {
     cmd_get_admin_password();
     return;
   }
 
   // IPPolicies - Get the current IP access control policies
-  if (strcmp(cmd, "IPPolicies") == 0) {
+  if (strcmp(cmd, "ippolicies") == 0) {
     cmd_get_ip_policies();
     return;
   }
 
   // BannedIDs - Get the current Steam ID ban list
-  if (strcmp(cmd, "BannedIDs") == 0) {
+  if (strcmp(cmd, "bannedids") == 0) {
     cmd_get_banned_ids();
     return;
   }
@@ -1529,139 +1785,116 @@ void hook_command_dispatch(void) {
 
   // SetLiveServerName - Set Server Name
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveServerName") == 0) {
+  if (strcmp(cmd, "setliveservername") == 0) {
     cmd_set_live_server_name();
     return;
   }
 
   // SetLiveShortName - Set Short Server Name
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveShortName") == 0) {
+  if (strcmp(cmd, "setliveshortname") == 0) {
     cmd_set_live_short_name();
     return;
   }
 
   // SetLiveAdminName - Set Admin Name
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveAdminName") == 0) {
+  if (strcmp(cmd, "setliveadminname") == 0) {
     cmd_set_live_admin_name();
     return;
   }
 
   // SetLiveAdminMail - Set Admin Mail
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveAdminMail") == 0) {
+  if (strcmp(cmd, "setliveadminmail") == 0) {
     cmd_set_live_admin_email();
     return;
   }
 
   // SetLiveServerRegion - Set Server Region
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveServerRegion") == 0) {
+  if (strcmp(cmd, "setliveserverregion") == 0) {
     cmd_set_live_server_region();
     return;
   }
 
   // SetLiveMOTD - Set Message of the Day
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveMOTD") == 0) {
+  if (strcmp(cmd, "setlivemotd") == 0) {
     cmd_set_live_motd();
     return;
   }
 
   // SetLiveGameDifficulty - Set Game Difficulty
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveGameDifficulty") == 0) {
+  if (strcmp(cmd, "setlivegamedifficulty") == 0) {
     cmd_set_live_game_difficulty(game_info);
     return;
   }
 
   // SetLiveMaxPlayer - Set Max Players
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveMaxPlayer") == 0) {
+  if (strcmp(cmd, "setlivemaxplayer") == 0) {
     cmd_set_live_max_players(game_info);
     return;
   }
 
   // SetLiveGamePassword - Set Game Password
   // Do not survive a map change
-  if (strcmp(cmd, "SetLiveGamePassword") == 0) {
+  if (strcmp(cmd, "setlivegamepassword") == 0) {
     cmd_set_live_game_password();
     return;
   }
 
   // --------------------------------------------------------------------------
 
-  if (strcmp(cmd, "CfgGetStr") == 0) {
+  if (strcmp(cmd, "cfggetstr") == 0) {
     cmd_cfg_get_str();
     return;
   }
 
-  if (strcmp(cmd, "CfgSetStr") == 0) {
+  if (strcmp(cmd, "cfggetint") == 0) {
+    cmd_cfg_get_int();
+    return;
+  }
+
+  if (strcmp(cmd, "cfggetfloat") == 0) {
+    cmd_cfg_get_float();
+    return;
+  }
+
+  if (strcmp(cmd, "cfggetbool") == 0) {
+    cmd_cfg_get_bool();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgsetstr") == 0) {
     cmd_cfg_set_str();
     return;
   }
 
-  if (strcmp(cmd, "CfgFlush") == 0) {
+  if (strcmp(cmd, "cfgsetint") == 0) {
+    cmd_cfg_set_int();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgsetfloat") == 0) {
+    cmd_cfg_set_float();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgsetbool") == 0) {
+    cmd_cfg_set_bool();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgflush") == 0) {
     cmd_cfg_flush();
     return;
   }
 
-  if (strcmp(cmd, "CfgGetSection") == 0) {
+  if (strcmp(cmd, "cfggetsection") == 0) {
     cmd_cfg_get_section();
     return;
   }
-
-  // --------------------------------------------------------------------------
-
-#ifdef DEBUG
-  // GameReplicationInfo (GRI) hex dump to file
-  if (strcmp(cmd, "DebugGRIDump") == 0) {
-    cmd_debug_gri_dump();
-    return;
-  }
-
-  // PlayerReplicationInfo (PRI) hex dump to file
-  if (strcmp(cmd, "DebugPRIDump") == 0) {
-    cmd_debug_pri_dump();
-    return;
-  }
-
-  // Actor list hex dump to file
-  if (strcmp(cmd, "DebugActorsDump") == 0) {
-    cmd_debug_actors_dump();
-    return;
-  }
-
-  // PlayerController (PC) list hex dump to file
-  if (strcmp(cmd, "DebugPCDump") == 0) {
-    cmd_debug_pc_dump();
-    return;
-  }
-
-  // PlayerController (PC) Pawn hex dump to file
-  if (strcmp(cmd, "DebugPCPawnDump") == 0) {
-    cmd_debug_pcpawn_dump();
-    return;
-  }
-
-  // PlayerController (PC) Network Connection hex dump to file
-  if (strcmp(cmd, "DebugPCNetConnDump") == 0) {
-    cmd_debug_pcnetconn_dump();
-    return;
-  }
-
-  // Global Name Table (GNames) list dump to file
-  if (strcmp(cmd, "DebugGNamesDump") == 0) {
-    cmd_debug_gnames_dump();
-    return;
-  }
-
-  // Nuke an entire ini section from the main
-  // configuration file, header included
-  if (strcmp(cmd, "DebugCfgEmptySection") == 0) {
-    cmd_debug_cfg_empty_section();
-    return;
-  }
-#endif
 }

@@ -236,7 +236,7 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
 
 /*
  * Returns the GConfig (FConfigCacheIni*) singleton pointer.
- * Dereferences ADDR_GCONFIG_PTR, returns NULL if not yet init.
+ * Dereferences ADDR_GCONFIG_PTR, returns NULL if not yet initialized.
  * All GConfig_* calls require a non-NULL return value.
  */
 void* get_gconfig(void) {

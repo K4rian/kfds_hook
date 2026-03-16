@@ -298,17 +298,17 @@ typedef int  (*GConfig_GetString_fn)(void*, const ucs2_t*, const ucs2_t*,
 typedef void (*GConfig_SetString_fn)(void*, const ucs2_t*, const ucs2_t*, 
                                     const ucs2_t*, const ucs2_t*, int);
 typedef int  (*GConfig_GetInt_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                  int*,   const ucs2_t*);
+                                  int*, const ucs2_t*);
 typedef void (*GConfig_SetInt_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                  int,    const ucs2_t*);
+                                  int, const ucs2_t*);
 typedef int  (*GConfig_GetFloat_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                  float*, const ucs2_t*);
+                                   float*, const ucs2_t*);
 typedef void (*GConfig_SetFloat_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                   float,  const ucs2_t*);
+                                   float, const ucs2_t*);
 typedef int  (*GConfig_GetBool_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                  int*,   const ucs2_t*);
+                                  int*, const ucs2_t*);
 typedef void (*GConfig_SetBool_fn)(void*, const ucs2_t*, const ucs2_t*, 
-                                  int,    const ucs2_t*);
+                                  int, const ucs2_t*);
 typedef void (*GConfig_Flush_fn)(void*, int, const ucs2_t*);
 typedef int  (*GConfig_GetSection_fn)(void*, const ucs2_t*, ucs2_t*, 
                                      int, const ucs2_t*);

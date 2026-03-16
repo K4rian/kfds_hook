@@ -15,6 +15,11 @@ void cmd_debug_pcnetconn_dump(void);
 void cmd_debug_gnames_dump(void);
 void cmd_debug_cfg_empty_section(void);
 
+// ============================================================================
+// DEBUG COMMAND DISPATCHER
+// ============================================================================
+void hook_debug_command_dispatch(char* cmd);
+
 #endif /* DEBUG */
 
 #endif /* HOOK_CMD_DEBUG_H */

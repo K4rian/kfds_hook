@@ -559,4 +559,60 @@ void cmd_debug_cfg_empty_section(void) {
   jb_raw(&jb, "}");
   hook_socket_finish_json(&jb);
 }
+
+// ============================================================================
+// DEBUG COMMAND DISPATCHER
+// ============================================================================
+void hook_debug_command_dispatch(char* cmd) {
+  hook_log_debug("Executing debug cmd: %s\n", cmd);
+
+  // GameReplicationInfo (GRI) hex dump to file
+  if (strcmp(cmd, "debuggridump") == 0) {
+    cmd_debug_gri_dump();
+    return;
+  }
+
+  // PlayerReplicationInfo (PRI) hex dump to file
+  if (strcmp(cmd, "debugpridump") == 0) {
+    cmd_debug_pri_dump();
+    return;
+  }
+
+  // Actor list hex dump to file
+  if (strcmp(cmd, "debugactorsdump") == 0) {
+    cmd_debug_actors_dump();
+    return;
+  }
+
+  // PlayerController (PC) list hex dump to file
+  if (strcmp(cmd, "debugpcdump") == 0) {
+    cmd_debug_pc_dump();
+    return;
+  }
+
+  // PlayerController (PC) Pawn hex dump to file
+  if (strcmp(cmd, "debugpcpawndump") == 0) {
+    cmd_debug_pcpawn_dump();
+    return;
+  }
+
+  // PlayerController (PC) Network Connection hex dump to file
+  if (strcmp(cmd, "debugpcnetconndump") == 0) {
+    cmd_debug_pcnetconn_dump();
+    return;
+  }
+
+  // Global Name Table (GNames) list dump to file
+  if (strcmp(cmd, "debuggnamesdump") == 0) {
+    cmd_debug_gnames_dump();
+    return;
+  }
+
+  // Nuke an entire ini section from a configuration file,
+  // header included
+  if (strcmp(cmd, "debugcfgemptysection") == 0) {
+    cmd_debug_cfg_empty_section();
+    return;
+  }
+}
 #endif /* DEBUG */
