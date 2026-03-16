@@ -514,4 +514,49 @@ void cmd_debug_gnames_dump(void) {
   jb_raw(&jb, "}");
   hook_socket_finish_json(&jb);
 }
+
+/*
+ * Empties a GConfig section and flushes to disk.
+ * Args: Section [, File]
+ * File: optional, empty string uses GConfig default.
+ * WARNING: destructive; removes the entire section with
+ * all K/V pairs, including the header.
+ */
+void cmd_debug_cfg_empty_section(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Section [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  utf8_to_ucs2(g_socket_slot.req.args[0], sec, 256);
+  if (g_socket_slot.req.argc > 1 && g_socket_slot.req.args[1][0]) {
+    utf8_to_ucs2(g_socket_slot.req.args[1], file, 256);
+    fp = file;
+  }
+
+  hook_log_debug("CfgEmptySection: calling EmptySection on [%s]\n",
+                 g_socket_slot.req.args[0]);
+
+  GConfig_EmptySection(gcfg, sec, fp);
+  GConfig_Flush(gcfg, 1, fp);
+
+  hook_log_debug("CfgEmptySection: done, flushed\n");
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_str(&jb, g_socket_slot.req.args[0]);
+  jb_raw(&jb, "}");
+  hook_socket_finish_json(&jb);
+}
 #endif /* DEBUG */

@@ -18,6 +18,13 @@
 //
 
 // ============================================================================
+// COMMAND DEFINES
+// ============================================================================
+#define CFG_BUF_CHARS 1024 // max config value / section / key (UTF-8)
+#define CFG_DEL_SEC_BUF (CFG_BUF_CHARS * 4)
+#define CFG_DEL_MAX_ENTRIES 512
+
+// ============================================================================
 // COMMAND HELPERS
 // ============================================================================
 /*
@@ -786,7 +793,8 @@ static void cmd_get_ip_policies(void) {
     return;
   }
 
-  TArrayFString *arr = (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":[");
@@ -827,7 +835,8 @@ static void cmd_get_banned_ids(void) {
     return;
   }
 
-  TArrayFString *arr = (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":[");
@@ -1197,6 +1206,199 @@ static void cmd_skip_trader(void *game_info) {
 }
 
 // ============================================================================
+// CONFIG
+// ============================================================================
+/*
+ * Retrieves a string value from GConfig.
+ * Args: Section, Key [, File]
+ * File is optional, omit or pass empty string to use GConfig default.
+ */
+static void cmd_cfg_get_str(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: Section, Key [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
+    arg_to_ucs2(2, file, 256);
+    fp = file;
+  }
+
+  ucs2_t out[ARG_MAX_CHARS] = {0};
+  if (!GConfig_GetString(gcfg, sec, key, out, ARG_MAX_CHARS, fp)) {
+    hook_socket_finish_err("not found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_ucs2(&jb, out);
+  jb_raw(&jb, "}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Sets a string value in GConfig.
+ * Args:   Section, Key, Value [, File [, Unique]]
+ * File    optional, empty string uses GConfig default.
+ * Unique: optional, "1" = replace if key exists, otherwise append.
+ *         Default is 0 (always append).
+ * Note: changes are in-memory only until CfgFlush is called.
+ */
+static void cmd_cfg_set_str(void) {
+  if (g_socket_slot.req.argc < 3) {
+    hook_socket_finish_err("args: Section, Key, Value [, File [, Unique]]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t val[ARG_MAX_CHARS] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+  arg_to_ucs2(2, val, ARG_MAX_CHARS);
+
+  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
+    arg_to_ucs2(3, file, 256);
+    fp = file;
+  }
+
+  int unique =
+      g_socket_slot.req.argc > 4 && strcmp(g_socket_slot.req.args[4], "1") == 0;
+
+  GConfig_SetString(gcfg, sec, key, val, fp, unique);
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Retrieves all key=value pairs from a GConfig section.
+ * Args: Section [, File]
+ * File: optionl, empty string uses GConfig default.
+ * GConfig_GetSection returns a double-null-terminated flat buffer:
+ *   "Key1=Val1\0Key2=Val2\0\0"
+ * Parses it into a JSON array of strings.
+ * Buffer size is CFG_BUF_CHARS*4 UCS-2 chars, 
+ * very large sections may be truncated silently.
+ */
+static void cmd_cfg_get_section(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Section [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+
+  if (g_socket_slot.req.argc > 1 && g_socket_slot.req.args[1][0]) {
+    arg_to_ucs2(1, file, 256);
+    fp = file;
+  }
+
+  ucs2_t raw[CFG_BUF_CHARS * 4] = {0};
+  GConfig_GetSection(gcfg, sec, raw, CFG_BUF_CHARS * 4, fp);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":[");
+
+  int first = 1;
+  int ri = 0;
+  while (ri < CFG_BUF_CHARS * 4 - 1) {
+    if (raw[ri] == 0)
+      break; // double-null = end of section
+
+    // find end of this entry
+    int start = ri;
+    while (raw[ri])
+      ri++;
+
+    // copy entry to temp buffer
+    int entry_len = ri - start;
+    int copy_len =
+        entry_len < ARG_MAX_CHARS - 1 ? entry_len : ARG_MAX_CHARS - 1;
+    ucs2_t entry[ARG_MAX_CHARS] = {0};
+    memcpy(entry, raw + start, copy_len * sizeof(ucs2_t));
+
+    char entry_utf8[ARG_MAX_CHARS] = {0};
+    ucs2_to_utf8(entry, entry_utf8, sizeof(entry_utf8));
+
+    if (!first)
+      jb_raw(&jb, ",");
+    first = 0;
+  
+    jb_str(&jb, entry_utf8);
+
+    ri++; // skip null separator
+  }
+  jb_raw(&jb, "]}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Flushes GConfig in-memory cache to disk.
+ * Args: [File]
+ * File: optional, empty string flushes all files.
+ * Call after any CfgSet* to persist changes across level changes.
+ */
+static void cmd_cfg_flush(void) {
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  if (g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]) {
+    arg_to_ucs2(0, file, 256);
+    fp = file;
+  }
+
+  // bRead=1 -> write to disk, preserve cache
+  // bRead=0 -> write then evict from cache
+  GConfig_Flush(gcfg, 1, fp);
+
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
 // COMMAND DISPATCHER
 // ============================================================================
 void hook_command_dispatch(void) {
@@ -1390,6 +1592,28 @@ void hook_command_dispatch(void) {
 
   // --------------------------------------------------------------------------
 
+  if (strcmp(cmd, "CfgGetStr") == 0) {
+    cmd_cfg_get_str();
+    return;
+  }
+
+  if (strcmp(cmd, "CfgSetStr") == 0) {
+    cmd_cfg_set_str();
+    return;
+  }
+
+  if (strcmp(cmd, "CfgFlush") == 0) {
+    cmd_cfg_flush();
+    return;
+  }
+
+  if (strcmp(cmd, "CfgGetSection") == 0) {
+    cmd_cfg_get_section();
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+
 #ifdef DEBUG
   // GameReplicationInfo (GRI) hex dump to file
   if (strcmp(cmd, "DebugGRIDump") == 0) {
@@ -1430,6 +1654,13 @@ void hook_command_dispatch(void) {
   // Global Name Table (GNames) list dump to file
   if (strcmp(cmd, "DebugGNamesDump") == 0) {
     cmd_debug_gnames_dump();
+    return;
+  }
+
+  // Nuke an entire ini section from the main
+  // configuration file, header included
+  if (strcmp(cmd, "DebugCfgEmptySection") == 0) {
+    cmd_debug_cfg_empty_section();
     return;
   }
 #endif

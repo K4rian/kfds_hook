@@ -57,6 +57,29 @@ Cast_APlayerController_fn Cast_APlayerController =
 FString_ctor_fn FString_ctor = (FString_ctor_fn)ADDR_FString_ctor_wchar;
 FString_dtor_fn FString_dtor = (FString_dtor_fn)ADDR_FString_dtor;
 
+GConfig_GetString_fn GConfig_GetString =
+    (GConfig_GetString_fn)ADDR_GConfig_GetString;
+GConfig_SetString_fn GConfig_SetString =
+    (GConfig_SetString_fn)ADDR_GConfig_SetString;
+GConfig_GetInt_fn GConfig_GetInt = 
+    (GConfig_GetInt_fn)ADDR_GConfig_GetInt;
+GConfig_SetInt_fn GConfig_SetInt = 
+    (GConfig_SetInt_fn)ADDR_GConfig_SetInt;
+GConfig_GetFloat_fn GConfig_GetFloat =
+    (GConfig_GetFloat_fn)ADDR_GConfig_GetFloat;
+GConfig_SetFloat_fn GConfig_SetFloat =
+    (GConfig_SetFloat_fn)ADDR_GConfig_SetFloat;
+GConfig_GetBool_fn GConfig_GetBool = 
+    (GConfig_GetBool_fn)ADDR_GConfig_GetBool;
+GConfig_SetBool_fn GConfig_SetBool = 
+    (GConfig_SetBool_fn)ADDR_GConfig_SetBool;
+GConfig_Flush_fn GConfig_Flush = 
+    (GConfig_Flush_fn)ADDR_GConfig_Flush;
+GConfig_GetSection_fn GConfig_GetSection =
+    (GConfig_GetSection_fn)ADDR_GConfig_GetSection;
+GConfig_EmptySection_fn GConfig_EmptySection =
+    (GConfig_EmptySection_fn)ADDR_GConfig_EmptySection;
+
 // ============================================================================
 // ENGINE
 // ============================================================================
@@ -212,6 +235,15 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
 }
 
 /*
+ * Returns the GConfig (FConfigCacheIni*) singleton pointer.
+ * Dereferences ADDR_GCONFIG_PTR, returns NULL if not yet init.
+ * All GConfig_* calls require a non-NULL return value.
+ */
+void* get_gconfig(void) {
+  return *(void**)ADDR_GCONFIG_PTR;
+}
+
+/*
  * Find the GRI actor by scanning for an object whose name starts with "GameR".
  */
 void *find_gri(void) {
@@ -246,8 +278,8 @@ void *find_gri(void) {
  * Find the AccessControl actor by scanning for an object whose name contains
  * "AccessControl".
  * AccessControl -> Info -> Actor, so it lives in the actor
- * list alongside GRI. Typically only one instance exists per level. 
- * Scan by name rather than following GameInfo+offset to avoid needing 
+ * list alongside GRI. Typically only one instance exists per level.
+ * Scan by name rather than following GameInfo+offset to avoid needing
  * a confirmed offset for the AccessControl* field on GameInfo.
  */
 void *find_access_control(void) {
@@ -265,11 +297,11 @@ void *find_access_control(void) {
     void *actor = actors[i];
     if (!actor)
       continue;
-  
+
     const ucs2_t *name = UObject_GetName(actor);
     if (!name)
       continue;
-  
+
     // Match "AccessControl"
     // 13 chars, check length first
     int len = 0;
@@ -277,7 +309,7 @@ void *find_access_control(void) {
       len++;
     if (len < 13)
       continue;
-  
+
     for (int j = 0; j <= len - 13; j++)
       if (name[j] == 'A' && name[j + 1] == 'c' && name[j + 2] == 'c' &&
           name[j + 3] == 'e' && name[j + 4] == 's' && name[j + 5] == 's' &&

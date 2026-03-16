@@ -44,6 +44,23 @@
 #define ADDR_GLOG_PTR   0x0878b7e0
 
 /*
+ * Global FConfigCacheIni* singleton.
+ * All GConfig methods take ucs2_t* (2-byte).
+ */
+#define ADDR_GCONFIG_PTR          0x0890d218
+#define ADDR_GConfig_GetString    0x080583f8
+#define ADDR_GConfig_SetString    0x0805887e
+#define ADDR_GConfig_GetInt       0x080591a0
+#define ADDR_GConfig_SetInt       0x080593ee
+#define ADDR_GConfig_GetFloat     0x08059254
+#define ADDR_GConfig_SetFloat     0x08059488
+#define ADDR_GConfig_GetBool      0x08059308
+#define ADDR_GConfig_SetBool      0x08059522
+#define ADDR_GConfig_Flush        0x0805814a
+#define ADDR_GConfig_GetSection   0x08058552
+#define ADDR_GConfig_EmptySection 0x08058a88
+
+/*
  * TArray<FNameEntry*>, global name table
  *   FNameEntry+0x0c = name string (ASCII)
  *   Confirmed: FName::operator* @0x804eafe
@@ -273,6 +290,31 @@ typedef void *(*Cast_APlayerController_fn)(void *);
 typedef void (*FString_ctor_fn)(FString *, const ucs2_t *);
 typedef void (*FString_dtor_fn)(FString *);
 
+typedef int  (*GConfig_GetString_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                      ucs2_t*, int, const ucs2_t*);
+// GConfig_SetString mode flag (last param):
+//  0 = always append
+//  1 = replace if key exists, otherwise append
+typedef void (*GConfig_SetString_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                    const ucs2_t*, const ucs2_t*, int);
+typedef int  (*GConfig_GetInt_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                  int*,   const ucs2_t*);
+typedef void (*GConfig_SetInt_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                  int,    const ucs2_t*);
+typedef int  (*GConfig_GetFloat_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                  float*, const ucs2_t*);
+typedef void (*GConfig_SetFloat_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                   float,  const ucs2_t*);
+typedef int  (*GConfig_GetBool_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                  int*,   const ucs2_t*);
+typedef void (*GConfig_SetBool_fn)(void*, const ucs2_t*, const ucs2_t*, 
+                                  int,    const ucs2_t*);
+typedef void (*GConfig_Flush_fn)(void*, int, const ucs2_t*);
+typedef int  (*GConfig_GetSection_fn)(void*, const ucs2_t*, ucs2_t*, 
+                                     int, const ucs2_t*);
+typedef void (*GConfig_EmptySection_fn)(void*, const ucs2_t*, 
+                                       const ucs2_t*);
+
 // ============================================================================
 // ENGINE GLOBAL STATE
 // ============================================================================
@@ -297,6 +339,18 @@ extern Cast_APlayerController_fn Cast_APlayerController;
 extern FString_ctor_fn FString_ctor;
 extern FString_dtor_fn FString_dtor;
 
+extern GConfig_GetString_fn    GConfig_GetString;
+extern GConfig_SetString_fn    GConfig_SetString;
+extern GConfig_GetInt_fn       GConfig_GetInt;
+extern GConfig_SetInt_fn       GConfig_SetInt;
+extern GConfig_GetFloat_fn     GConfig_GetFloat;
+extern GConfig_SetFloat_fn     GConfig_SetFloat;
+extern GConfig_GetBool_fn      GConfig_GetBool;
+extern GConfig_SetBool_fn      GConfig_SetBool;
+extern GConfig_Flush_fn        GConfig_Flush;
+extern GConfig_GetSection_fn   GConfig_GetSection;
+extern GConfig_EmptySection_fn GConfig_EmptySection;
+
 // ============================================================================
 // ENGINE
 // ============================================================================
@@ -311,6 +365,7 @@ int is_game_started(void);
 int is_player_controller(const ucs2_t *name);
 int is_zed_actor(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
+void* get_gconfig(void);
 void *find_gri(void);
 void *find_access_control(void);
 
