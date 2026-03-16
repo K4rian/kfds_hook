@@ -774,6 +774,107 @@ static void cmd_get_admin_password(void) {
   hook_socket_finish_json(&jb);
 }
 
+/*
+ * Returns the live IPPolicies TArray as a JSON string array.
+ * Each entry is a policy string, e.g. "ACCEPT;*" or "DENY;1.2.3.4".
+ * Reflects the current in-memory state.
+ */
+static void cmd_get_ip_policies(void) {
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  TArrayFString *arr = (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":[");
+
+  if (!arr->Data || arr->Num <= 0) {
+    jb_raw(&jb, "]}");
+    hook_socket_finish_json(&jb);
+    return;
+  }
+
+  char utf8[ARG_MAX_CHARS];
+  int first = 1;
+  for (int i = 0; i < arr->Num; i++) {
+    FString *entry = &arr->Data[i];
+    if (!entry->Data || entry->Num <= 0 || entry->Num > 512)
+      continue;
+
+    if (!first)
+      jb_raw(&jb, ",");
+    first = 0;
+
+    ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
+    jb_str(&jb, utf8);
+  }
+  jb_raw(&jb, "]}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Returns the live BannedIDs TArray as a structured JSON array.
+ * Each entry is split on the first space: left=SteamID, right=PlayerName.
+ */
+static void cmd_get_banned_ids(void) {
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  TArrayFString *arr = (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":[");
+
+  if (!arr->Data || arr->Num <= 0) {
+    jb_raw(&jb, "]}");
+    hook_socket_finish_json(&jb);
+    return;
+  }
+
+  char utf8[ARG_MAX_CHARS];
+  int first = 1;
+  for (int i = 0; i < arr->Num; i++) {
+    FString *entry = &arr->Data[i];
+    if (!entry->Data || entry->Num <= 0 || entry->Num > 512)
+      continue;
+    ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
+
+    // Split "<steamid> <name>" on first space
+    char *space = strchr(utf8, ' ');
+    char id_buf[32] = {0};
+    char name_buf[128] = {0};
+    if (space) {
+      int id_len = (int)(space - utf8);
+      if (id_len >= (int)sizeof(id_buf))
+        id_len = sizeof(id_buf) - 1;
+      memcpy(id_buf, utf8, id_len);
+      strncpy(name_buf, space + 1, sizeof(name_buf) - 1);
+    } else {
+      strncpy(id_buf, utf8, sizeof(id_buf) - 1);
+      strncpy(name_buf, "?", sizeof(name_buf) - 1);
+    }
+
+    if (!first)
+      jb_raw(&jb, ",");
+    first = 0;
+    jb_raw(&jb, "{\"id\":");
+    jb_str(&jb, id_buf);
+    jb_raw(&jb, ",\"name\":");
+    jb_str(&jb, name_buf);
+    jb_raw(&jb, "}");
+  }
+  jb_raw(&jb, "]}");
+
+  hook_socket_finish_json(&jb);
+}
+
 // ============================================================================
 // LIVE
 // ============================================================================
@@ -1207,6 +1308,18 @@ void hook_command_dispatch(void) {
   // AdminPassword - Get the current admin's password
   if (strcmp(cmd, "AdminPassword") == 0) {
     cmd_get_admin_password();
+    return;
+  }
+
+  // IPPolicies - Get the current IP access control policies
+  if (strcmp(cmd, "IPPolicies") == 0) {
+    cmd_get_ip_policies();
+    return;
+  }
+
+  // BannedIDs - Get the current Steam ID ban list
+  if (strcmp(cmd, "BannedIDs") == 0) {
+    cmd_get_banned_ids();
     return;
   }
 
