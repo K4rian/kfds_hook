@@ -12,6 +12,7 @@ void cmd_debug_actors_dump(void);
 void cmd_debug_pc_dump(void);
 void cmd_debug_pcpawn_dump(void);
 void cmd_debug_pcnetconn_dump(void);
+void cmd_debug_gnames_dump(void);
 
 #endif /* DEBUG */
 

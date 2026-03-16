@@ -1,19 +1,33 @@
 #ifndef HOOK_ENGINE_H
 #define HOOK_ENGINE_H
+// clang-format off
 
 #include "hook_ucs2.h"
 
 // ============================================================================
 // ENGINE FUNCTION ADDRESSES
 // ============================================================================
-#define ADDR_UObject_GetName 0x08076642
+#define ADDR_UObject_GetName                      0x08076642
 
-#define ADDR_UGameEngine_Tick 0x08143866
-#define ADDR_UGameEngine_Exec 0x08129874
+#define ADDR_UGameEngine_Tick                     0x08143866
+#define ADDR_UGameEngine_Exec                     0x08129874
+#define ADDR_UGameEngine_GetMaxTickRate           0x08141bba
 
-#define ADDR_ULevel_GetLevelInfo          0x080de61a
-#define ADDR_ALevelInfo_eventServerTravel 0x08146612
-#define ADDR_AGameInfo_eventBroadcast     0x081468d8
+#define ADDR_ULevel_GetLevelInfo                  0x080de61a
+
+#define ADDR_ALevelInfo_eventServerTravel         0x08146612
+
+#define ADDR_AGameInfo_eventBroadcast             0x081468d8
+#define ADDR_AGameInfo_eventKickIdler             0x08173b2a
+
+#define ADDR_AActor_eventTakeDamage               0x085db274
+
+#define ADDR_APlayerController_eventClientMessage 0x080fcd8e
+/*
+ * Dynamic cast, returns non-NULL only if the object is an
+ * APlayerController or subclass.
+ */
+#define ADDR_Cast_APlayerController               0x080897be
 
 /*
  * FString memory management
@@ -26,8 +40,15 @@
  * GLog: FOutputDevice* passed to UGameEngine::Exec as output device
  * GNull: null FOutputDevice*, suppresses all output
  */
-#define ADDR_GNULL_PTR 0x0878b7e8
-#define ADDR_GLOG_PTR  0x0878b7e0
+#define ADDR_GNULL_PTR  0x0878b7e8
+#define ADDR_GLOG_PTR   0x0878b7e0
+
+/*
+ * TArray<FNameEntry*>, global name table
+ *   FNameEntry+0x0c = name string (ASCII)
+ *   Confirmed: FName::operator* @0x804eafe
+ */
+#define ADDR_GNAMES 0x089c4c60
 
 // ============================================================================
 // ENGINE STRUCT OFFSETS
@@ -83,7 +104,6 @@
  *   +0x5c9  BaseDifficulty   byte
  *   +0x5ca  FinalWave        byte
  *   +0x5cc  numMonsters      int
- *   +0x5d0  bWaveInProgress  int
  *   +0x5f8  TimeToNextWave   int   (replication of KFGameType.WaveCountDown)
  *   +0x5fc  bWaveInProgress  bool  (1=wave active, 0=trader/lobby)
  *   +0x678  GameDiff         float (replication of BaseDifficulty)
@@ -103,6 +123,24 @@
 #define GRI_OFFSET_GameDiff        0x678
 
 /*
+ * APlayerReplicationInfo (PRI)
+ *   +0x3b4  Dosh                     float32
+ *   +0x3c0  Ping                     uint8
+ *   +0x3cc  Deaths                   int
+ *   +0x3d0  PlayerName               FString
+ *   +0x45c  Kills                    int
+ *   +0x5f4  ClientVeteranSkill       UClass*
+ *   +0x5f8  ClientVeteranSkillLevel  int
+ */
+#define PRI_OFFSET_Dosh                    0x3b4
+#define PRI_OFFSET_Ping                    0x3c0
+#define PRI_OFFSET_Deaths                  0x3cc
+#define PRI_OFFSET_PlayerName              0x3d0
+#define PRI_OFFSET_Kills                   0x45c
+#define PRI_OFFSET_ClientVeteranSkill      0x5f4
+#define PRI_OFFSET_ClientVeteranSkillLevel 0x5f8
+
+/*
  * APlayerController
  *   +0x360  APawn*
  *           NULL when dead, set when alive/spawned
@@ -114,18 +152,49 @@
 #define APLAYERCONTROLLER_OFFSET_NETCONN 0x514
 
 /*
+ * KFPawn (Pawn actor, accessed via PC+0x360)
+ *   +0x480  Health          int
+ *   +0x774  ShieldStrength  float
+ */
+#define APAWN_OFFSET_Health         0x480
+#define APAWN_OFFSET_ShieldStrength 0x774
+
+/*
+ * UNetConnection
+ *   +0x088  RemoteAddr  FString  (IP string)
+ *   +0x460  SteamID64   uint64_t (temp, destroyed after a level change)
+ *   +0x484  SteamID64   uint64_t
+ *   +0x49c  SteamID64   uint64_t
+ */
+#define UNETCONN_OFFSET_IP          0x088
+#define UNETCONN_OFFSET_STEAMID     0x484
+#define UNETCONN_OFFSET_STEAMID_ALT 0x49c
+
+/*
  * KFGameType (Invasion)
- *   +0x1568  bTradingDoorsOpen  bool  (1=trader, 0=wave)
- *   +0x157c  bWaveInProgress    bool  (0=trader, 1=wave)
- *   +0x1578  WaveCountDown      int   (countdown seconds)
  *   +0x03bc  GameDifficulty     float
  *   +0x049c  MaxPlayers         int
+ *   +0x1568  bTradingDoorsOpen  bool (1=trader, 0=wave)
+ *   +0x1578  WaveCountDown      int  (countdown seconds)
+ *   +0x157c  bWaveInProgress    bool (0=trader, 1=wave)
  */
-#define GAMETYPE_OFFSET_bTradingDoorsOpen 0x1568
-#define GAMETYPE_OFFSET_bWaveInProgress   0x157c
-#define GAMETYPE_OFFSET_WaveCountDown     0x1578
 #define GAMETYPE_OFFSET_GameDifficulty    0x03bc
 #define GAMETYPE_OFFSET_MaxPlayers        0x049c
+#define GAMETYPE_OFFSET_bTradingDoorsOpen 0x1568
+#define GAMETYPE_OFFSET_WaveCountDown     0x1578
+#define GAMETYPE_OFFSET_bWaveInProgress   0x157c
+
+/*
+ * FName indices for AGameInfo::eventBroadcast and
+ * APlayerController::eventClientMessage message type routing.
+ * Controls chat channel styling (color, format, display size).
+ */
+// #define FNAME_Event         710
+// #define FNAME_Say           2038
+// #define FNAME_TeamSay       2037
+#define FNAME_ServerSay     2643
+// #define FNAME_ServerTeamSay 2644
+#define FNAME_CriticalEvent 5863
 
 // ============================================================================
 // ENGINE TYPES
@@ -166,13 +235,20 @@ typedef const ucs2_t *(*UObject_GetName_fn)(void *);
 
 typedef void (*UGameEngine_Tick_fn)(void *, float);
 typedef int (*UGameEngine_Exec_fn)(void *, const ucs2_t *, void *);
+typedef float (*UGameEngine_GetMaxTickRate_fn)(void *);
 
 typedef void *(*ULevel_GetLevelInfo_fn)(void *);
+
 typedef void (*ALevelInfo_eventServerTravel_fn)(void *, const FString *,
                                                 unsigned int);
 
 typedef void (*AGameInfo_eventBroadcast_fn)(void *, void *, const FString *,
                                             FName);
+typedef void (*AGameInfo_eventKickIdler_fn)(void *, void *);
+
+typedef void (*APlayerController_eventClientMessage_fn)(void *, 
+                                                       FString const *, FName);
+typedef void *(*Cast_APlayerController_fn)(void *);
 
 typedef void (*FString_ctor_fn)(FString *, const ucs2_t *);
 typedef void (*FString_dtor_fn)(FString *);
@@ -183,11 +259,18 @@ typedef void (*FString_dtor_fn)(FString *);
 extern UObject_GetName_fn UObject_GetName;
 
 extern UGameEngine_Exec_fn UGameEngine_Exec;
+extern UGameEngine_GetMaxTickRate_fn UGameEngine_GetMaxTickRate;
 
 extern ULevel_GetLevelInfo_fn ULevel_GetLevelInfo;
+
 extern ALevelInfo_eventServerTravel_fn ALevelInfo_eventServerTravel;
 
 extern AGameInfo_eventBroadcast_fn AGameInfo_eventBroadcast;
+extern AGameInfo_eventKickIdler_fn AGameInfo_eventKickIdler;
+
+extern APlayerController_eventClientMessage_fn
+    APlayerController_eventClientMessage;
+extern Cast_APlayerController_fn Cast_APlayerController;
 
 extern FString_ctor_fn FString_ctor;
 extern FString_dtor_fn FString_dtor;
@@ -207,4 +290,5 @@ int is_player_controller(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
 void *find_gri(void);
 
+// clang-format on
 #endif /* HOOK_ENGINE_H */

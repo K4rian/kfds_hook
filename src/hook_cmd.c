@@ -13,6 +13,10 @@
 #include "hook_cmd_debug.h"
 #endif
 
+//
+// TODO: Cleanup
+//
+
 // ============================================================================
 // COMMAND HELPERS
 // ============================================================================
@@ -171,7 +175,7 @@ static void cmd_say(void *game_info) {
   arg_to_ucs2(0, buf, ARG_MAX_CHARS);
 
   FString fmsg;
-  FName ftype = {0}; // zero-init avoids stack corruption
+  FName ftype = {FNAME_ServerSay};
   FString_ctor(&fmsg, buf);
   AGameInfo_eventBroadcast(game_info, NULL, &fmsg, ftype);
   FString_dtor(&fmsg);
@@ -180,10 +184,29 @@ static void cmd_say(void *game_info) {
   hook_socket_finish_ok();
 }
 
+static void cmd_announce(void *game_info) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Message");
+    return;
+  }
+
+  ucs2_t buf[ARG_MAX_CHARS];
+  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
+
+  FString fmsg;
+  FName ftype = {FNAME_CriticalEvent};
+  FString_ctor(&fmsg, buf);
+  AGameInfo_eventBroadcast(game_info, NULL, &fmsg, ftype);
+  FString_dtor(&fmsg);
+
+  hook_log_debug("Announce: '%s'\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
 // ============================================================================
 // SERVER INFO
 // ============================================================================
-void cmd_get_server_info(void) {
+static void cmd_get_server_info(void) {
   void *gri = find_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
@@ -234,12 +257,17 @@ void cmd_get_server_info(void) {
   jb_raw(&jb, ",\"final_wave\":");
   jb_int(&jb, *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_FinalWave));
 
-  // Float field
+  // Float fields
   jb_raw(&jb, ",\"game_diff\":");
   float gd = *(float *)((uint8_t *)gri + GRI_OFFSET_GameDiff);
   char fbuf[32];
   snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
   jb_raw(&jb, fbuf);
+
+  jb_raw(&jb, ",\"max_tick_rate\":");
+  float rate = UGameEngine_GetMaxTickRate((void *)hook_engine_get());
+  jb_float(&jb, rate);
+  jb_raw(&jb, "}");
 
   jb_raw(&jb, "}}");
 
@@ -309,6 +337,282 @@ static void cmd_get_level_url(void) {
 
   // TODO: LOG
   hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
+// PLAYERS
+// ============================================================================
+/*
+ * Returns all connected players.
+ * Traversal: actor list -> is_player_controller -> PC -> PRI (for stats)
+ *                                               -> PC -> NetConn (for network)
+ *                                               -> PC -> Pawn (for hp/armor)
+ * PRI.Owner points to GRI, NOT to the owning PC, cannot traverse PRI->PC.
+ * WebAdmin (UTServerAdminSpectator) actor skipped.
+ * Ping: uint8 at PRI+0x3c0, displayed ms=raw*4 (TBC).
+ * Dosh: float32.
+ * Health: int at Pawn+0x480. -1 if Pawn is NULL (player dead/spectating).
+ * Armor: float at Pawn+0x774, cast to int. -1 if Pawn is NULL.
+ * Perk: UClass* at PRI+0x5f4, name via UObject_GetName,
+ *       "KFVet" prefix stripped, null if pointer is NULL.
+ * Perk Level: int at PRI+0x5f8, 1-indexed (1-6).
+ */
+static void cmd_get_players(void) {
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":[");
+  int first = 1;
+
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+    if (!is_player_controller(UObject_GetName(actor)))
+      continue;
+
+    void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
+    if (!pri)
+      continue;
+
+    FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
+    if (!name_fs->Data || name_fs->Num <= 1)
+      continue;
+
+    void *netconn =
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+    uint64_t steamid =
+        netconn ? *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID)
+                : 0;
+    if (steamid == 0 && netconn)
+      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+
+    char ip[64] = {0};
+    if (netconn) {
+      FString *ip_fs = (FString *)((uint8_t *)netconn + UNETCONN_OFFSET_IP);
+      if (ip_fs->Data && ip_fs->Num > 1 && ip_fs->Num <= 64)
+        ucs2_to_utf8(ip_fs->Data, ip, sizeof(ip));
+    }
+
+    uint8_t ping_raw = *(uint8_t *)((uint8_t *)pri + PRI_OFFSET_Ping);
+    int ping_ms = (int)ping_raw * 4;
+    float dosh = *(float *)((uint8_t *)pri + PRI_OFFSET_Dosh);
+    int kills = *(int *)((uint8_t *)pri + PRI_OFFSET_Kills);
+    int deaths = *(int *)((uint8_t *)pri + PRI_OFFSET_Deaths);
+    // TODO: assists
+
+    // Health and armor from Pawn: -1 if dead/spectating (Pawn == NULL)
+    void *pawn = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PAWN);
+    int health = -1;
+    int armor = -1;
+    if (pawn) {
+      health = *(int *)((uint8_t *)pawn + APAWN_OFFSET_Health);
+      armor = (int)*(float *)((uint8_t *)pawn + APAWN_OFFSET_ShieldStrength);
+    }
+
+    // Perk name and level from PRI
+    // Since ClientVeteranSkill is a UClass*, call UObject_GetName() on it
+    // Strip "KFVet" prefix if present, and leave raw name for custom perk mods
+    // that don't follow the naming convention
+    // perk_level is 1-indexed (1-6), matching in-game display
+    // Both fields are null if the pointer is NULL (shouldn't happen mid-wave)
+    char perk_name[64] = "";
+    int perk_level = 0;
+
+    void *vet_class =
+        *(void **)((uint8_t *)pri + PRI_OFFSET_ClientVeteranSkill);
+    if (vet_class) {
+      const ucs2_t *vname = UObject_GetName(vet_class);
+      if (vname) {
+        // Check for "KFVet" prefix and strip if present
+        int strip = (vname[0] == 'K' && vname[1] == 'F' && vname[2] == 'V' &&
+                     vname[3] == 'e' && vname[4] == 't');
+        const ucs2_t *src = strip ? vname + 5 : vname;
+        int j = 0;
+        while (src[j] && j < 63) {
+          perk_name[j] = (char)src[j];
+          j++;
+        }
+        perk_name[j] = '\0';
+      }
+      perk_level =
+          *(int *)((uint8_t *)pri + PRI_OFFSET_ClientVeteranSkillLevel);
+    }
+
+    char name_utf8[ARG_MAX_CHARS];
+    ucs2_to_utf8(name_fs->Data, name_utf8, sizeof(name_utf8));
+
+    if (!first)
+      jb_raw(&jb, ",");
+    first = 0;
+
+    jb_raw(&jb, "{");
+    jb_raw(&jb, "\"name\":");
+    jb_str(&jb, name_utf8);
+    jb_raw(&jb, ",\"steamid\":");
+    jb_uint64_str(&jb, steamid);
+    jb_raw(&jb, ",\"ip\":");
+    jb_str(&jb, ip);
+    jb_raw(&jb, ",\"ping\":");
+    jb_int(&jb, ping_ms);
+    jb_raw(&jb, ",\"dosh\":");
+    jb_int(&jb, (int)dosh);
+    jb_raw(&jb, ",\"kills\":");
+    jb_int(&jb, kills);
+    jb_raw(&jb, ",\"deaths\":");
+    jb_int(&jb, deaths);
+    jb_raw(&jb, ",\"health\":");
+    jb_int(&jb, health);
+    jb_raw(&jb, ",\"armor\":");
+    jb_int(&jb, armor);
+    if (perk_name[0]) {
+      jb_raw(&jb, ",\"perk\":");
+      jb_str(&jb, perk_name);
+      jb_raw(&jb, ",\"perk_level\":");
+      jb_int(&jb, perk_level);
+    } else {
+      jb_raw(&jb, ",\"perk\":null,\"perk_level\":null");
+    }
+    jb_raw(&jb, "}");
+  }
+
+  jb_raw(&jb, "]}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Kicks a player by SteamID64.
+ * Uses Cast_APlayerController to confirm each actor is a PC.
+ * Skips UTServerAdminSpectator (WebAdmin).
+ */
+static void cmd_kick(void *game_info) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: SteamID64");
+    return;
+  }
+
+  uint64_t target = (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
+  if (target == 0) {
+    hook_socket_finish_err("invalid SteamID");
+    return;
+  }
+
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+
+  int kicked = 0;
+  for (int i = 0; i < actor_count && !kicked; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+
+    void *pc = Cast_APlayerController(actor);
+    if (!pc)
+      continue;
+
+    const ucs2_t *objname = UObject_GetName(pc);
+    if (!objname)
+      continue;
+    // Skip UTServerAdminSpectator
+    if (objname[0] == 'U' && objname[1] == 'T' && objname[2] == 'S' &&
+        objname[3] == 'e')
+      continue;
+
+    void *netconn =
+        *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_NETCONN);
+    if (!netconn)
+      continue;
+
+    uint64_t steamid =
+        *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
+    if (steamid == 0)
+      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+
+    hook_log_debug("kick: pc=%p steamid=%" PRIu64 " target=%" PRIu64 "\n", pc,
+                   steamid, target);
+
+    if (steamid == target) {
+      AGameInfo_eventKickIdler(game_info, pc);
+      kicked = 1;
+    }
+  }
+  kicked ? hook_socket_finish_ok() : hook_socket_finish_err("player not found");
+}
+
+/*
+ * Sends a private message to one specific player via ClientMessage RPC.
+ * Message is visible only to the target.
+ * Bypasses the broadcast chain entirely.
+ */
+static void cmd_send_player_message(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: SteamID64, Message");
+    return;
+  }
+
+  uint64_t target_id = (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
+  if (target_id == 0) {
+    hook_socket_finish_err("invalid SteamID");
+    return;
+  }
+
+  void *level =
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+  void **actors = *(void ***)((uint8_t *)level + 0x30);
+  int actor_count = *(int *)((uint8_t *)level + 0x34);
+
+  // Build prefixed message
+  static const char prefix[] = "[Server->You]: ";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  const size_t msg_len = strlen(g_socket_slot.req.args[1]);
+  const size_t copy_len = msg_len < (ARG_MAX_CHARS - prefix_len - 1)
+                              ? msg_len
+                              : (ARG_MAX_CHARS - prefix_len - 1);
+  char prefixed[ARG_MAX_CHARS];
+  memcpy(prefixed, prefix, prefix_len);
+  memcpy(prefixed + prefix_len, g_socket_slot.req.args[1], copy_len);
+  prefixed[prefix_len + copy_len] = '\0';
+
+  ucs2_t msg_ucs2[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(prefixed, msg_ucs2, ARG_MAX_CHARS);
+
+  FString msg_fstr = {0};
+  FString_ctor(&msg_fstr, msg_ucs2);
+  FName ftype = {FNAME_ServerSay};
+
+  int found = 0;
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+    if (!is_player_controller(UObject_GetName(actor)))
+      continue;
+
+    void *netconn =
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+    if (!netconn)
+      continue;
+
+    uint64_t sid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
+    if (sid == 0)
+      sid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+    if (sid != target_id)
+      continue;
+
+    APlayerController_eventClientMessage(actor, &msg_fstr, ftype);
+    found = 1;
+    break;
+  }
+  FString_dtor(&msg_fstr);
+
+  found ? hook_socket_finish_ok() : hook_socket_finish_err("player not found");
 }
 
 // ============================================================================
@@ -580,6 +884,8 @@ static void cmd_skip_trader(void *game_info) {
   }
 
   *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_WaveCountDown) = 6;
+  hook_log_debug("SkipTrader: %d -> 6\n", countdown);
+
   hook_socket_finish_ok();
 }
 
@@ -626,6 +932,12 @@ void hook_command_dispatch(void) {
     return;
   }
 
+  // Announce - Admin Announcement
+  if (strcmp(cmd, "Announce") == 0) {
+    cmd_announce(game_info);
+    return;
+  }
+
   // ServerInfo - Get Server Info
   if (strcmp(cmd, "ServerInfo") == 0) {
     cmd_get_server_info();
@@ -649,6 +961,26 @@ void hook_command_dispatch(void) {
     cmd_skip_trader(game_info);
     return;
   }
+
+  // Players - Get all connected players
+  if (strcmp(cmd, "Players") == 0) {
+    cmd_get_players();
+    return;
+  }
+
+  // Kick - Kick a player by SteamID64
+  if (strcmp(cmd, "Kick") == 0) {
+    cmd_kick(game_info);
+    return;
+  }
+
+  // SendPlayerMessage - Send a message to a connected player
+  if (strcmp(cmd, "SendPlayerMessage") == 0) {
+    cmd_send_player_message();
+    return;
+  }
+
+  // --------------------------------------------------------------------------
 
   // SetLiveServerName - Set Server Name
   // Do not survive a map change
@@ -742,6 +1074,12 @@ void hook_command_dispatch(void) {
   // PlayerController (PC) Network Connection hex dump to file
   if (strcmp(cmd, "DebugPCNetConnDump") == 0) {
     cmd_debug_pcnetconn_dump();
+    return;
+  }
+
+  // Global Name Table (GNames) list dump to file
+  if (strcmp(cmd, "DebugGNamesDump") == 0) {
+    cmd_debug_gnames_dump();
     return;
   }
 #endif

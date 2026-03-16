@@ -31,14 +31,25 @@ UObject_GetName_fn UObject_GetName = (UObject_GetName_fn)ADDR_UObject_GetName;
 
 UGameEngine_Exec_fn UGameEngine_Exec =
     (UGameEngine_Exec_fn)ADDR_UGameEngine_Exec;
+UGameEngine_GetMaxTickRate_fn UGameEngine_GetMaxTickRate =
+    (UGameEngine_GetMaxTickRate_fn)ADDR_UGameEngine_GetMaxTickRate;
 
 ULevel_GetLevelInfo_fn ULevel_GetLevelInfo =
     (ULevel_GetLevelInfo_fn)ADDR_ULevel_GetLevelInfo;
+
 ALevelInfo_eventServerTravel_fn ALevelInfo_eventServerTravel =
     (ALevelInfo_eventServerTravel_fn)ADDR_ALevelInfo_eventServerTravel;
 
 AGameInfo_eventBroadcast_fn AGameInfo_eventBroadcast =
     (AGameInfo_eventBroadcast_fn)ADDR_AGameInfo_eventBroadcast;
+AGameInfo_eventKickIdler_fn AGameInfo_eventKickIdler =
+    (AGameInfo_eventKickIdler_fn)ADDR_AGameInfo_eventKickIdler;
+
+APlayerController_eventClientMessage_fn APlayerController_eventClientMessage =
+    (APlayerController_eventClientMessage_fn)
+        ADDR_APlayerController_eventClientMessage;
+Cast_APlayerController_fn Cast_APlayerController =
+    (Cast_APlayerController_fn)ADDR_Cast_APlayerController;
 
 FString_ctor_fn FString_ctor = (FString_ctor_fn)ADDR_FString_ctor_wchar;
 FString_dtor_fn FString_dtor = (FString_dtor_fn)ADDR_FString_dtor;
@@ -119,7 +130,7 @@ int is_server_busy(void) {
  * false->true transition observed), 0 otherwise.
  */
 int is_game_started(void) {
-    return game_started;
+  return game_started;
 }
 
 /*

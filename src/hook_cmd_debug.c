@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "hook_cmd_debug.h"
 #include "hook_config.h"
@@ -473,4 +474,44 @@ void cmd_debug_pcnetconn_dump(void) {
   hook_socket_finish_json(&jb);
 }
 
+/*
+ * Dumps all GNames entries to a file.
+ * Output format: index, name string per line.
+ */
+void cmd_debug_gnames_dump(void) {
+  char path[512];
+  FILE *f = dump_open("GNamesDump",
+                      g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
+                          ? g_socket_slot.req.args[0]
+                          : NULL,
+                      path, sizeof(path));
+  if (!f) {
+    hook_socket_finish_err("failed to open dump file");
+    return;
+  }
+
+  void **data = *(void ***)ADDR_GNAMES;
+  int num = *(int *)(ADDR_GNAMES + 4);
+
+  fprintf(f, "GNames: %d entries\n\n", num);
+  for (int i = 0; i < num; i++) {
+    void *entry = data[i];
+    if (!entry)
+      continue;
+    const ucs2_t *entry_name = (const ucs2_t *)((uint8_t *)entry + 0x0c);
+    char name_utf8[256] = {0};
+    ucs2_to_utf8(entry_name, name_utf8, sizeof(name_utf8));
+    fprintf(f, "[%d] %s\n", i, name_utf8);
+  }
+
+  fclose(f);
+  hook_log_debug("GNamesDump saved to %s\n", path);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_str(&jb, path);
+  jb_raw(&jb, "}");
+  hook_socket_finish_json(&jb);
+}
 #endif /* DEBUG */
