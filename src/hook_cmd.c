@@ -8,6 +8,7 @@
 #include "hook_json.h"
 #include "hook_log.h"
 #include "hook_socket.h"
+#include "hook_ucs2.h"
 #include "kfds_hook.h"
 
 #ifdef DEBUG
@@ -112,6 +113,98 @@ static int gri_set_int(int offset, const char *value) {
 
   hook_log_debug("gri_set_int: field=+0x%x value=%d\n", offset, v);
   return 1;
+}
+
+/*
+ * Helper shared by several config destructive functions.
+ * Performs the GetSection->filter->EmptySection->reinject->Flush entirely in C.
+ * section,
+ * key,
+ * file:     UCS-2 strings (file may be NULL for GConfig default)
+ * value:    UCS-2 value to match exactly (case-sensitive)
+ *           NULL = key-only mode: delete all entries whose key matches
+ * max_del:  0 = delete all matches, N = delete at most N occurrences
+ * Returns:  number of entries deleted, 0 if no matches, -1 on internal error.
+ */
+static int cfg_delete_entries(void *gcfg, const ucs2_t *section,
+                              const ucs2_t *key, const ucs2_t *value,
+                              const ucs2_t *file, int max_del) {
+  // Read all entries from the section
+  ucs2_t raw[CFG_DEL_SEC_BUF];
+  memset(raw, 0, sizeof(raw));
+  GConfig_GetSection(gcfg, section, raw, CFG_DEL_SEC_BUF, file);
+
+  // Parse and filter
+  ucs2_t survivors[CFG_DEL_MAX_ENTRIES][ARG_MAX_CHARS * 2];
+  int survivor_cnt = 0;
+  int deleted_cnt = 0;
+
+  int ri = 0;
+  while (ri < CFG_DEL_SEC_BUF - 1 && survivor_cnt < CFG_DEL_MAX_ENTRIES) {
+    if (raw[ri] == 0)
+      break;
+
+    int start = ri;
+    while (ri < CFG_DEL_SEC_BUF - 1 && raw[ri])
+      ri++;
+    int entry_len = ri - start;
+    ri++; // skip null separator
+
+    if (entry_len <= 0 || entry_len >= ARG_MAX_CHARS * 2)
+      continue;
+
+    ucs2_t entry[ARG_MAX_CHARS * 2];
+    memcpy(entry, raw + start, entry_len * sizeof(ucs2_t));
+    entry[entry_len] = 0;
+
+    ucs2_t ekey[256] = {0};
+    ucs2_t eval[ARG_MAX_CHARS] = {0};
+    ucs2_split_eq(entry, ekey, 256, eval, ARG_MAX_CHARS);
+
+    int should_delete = 0;
+    if (ucs2_icmp(ekey, key) == 0) {
+      if (value == NULL) {
+        // key-only mode
+        if (max_del == 0 || deleted_cnt < max_del)
+          should_delete = 1;
+      } else {
+        // exact key+value match (case-sensitive on value)
+        int i = 0;
+        while (eval[i] && value[i] && eval[i] == value[i])
+          i++;
+        if (eval[i] == 0 && value[i] == 0) {
+          if (max_del == 0 || deleted_cnt < max_del)
+            should_delete = 1;
+        }
+      }
+    }
+
+    if (should_delete) {
+      deleted_cnt++;
+    } else {
+      memcpy(survivors[survivor_cnt], entry, (entry_len + 1) * sizeof(ucs2_t));
+      survivor_cnt++;
+    }
+  }
+
+  if (deleted_cnt == 0)
+    return 0;
+
+  // Wipe section
+  GConfig_EmptySection(gcfg, section, file);
+
+  // Re-inject survivors (unique=0, preserve duplicates for arrays)
+  for (int si = 0; si < survivor_cnt; si++) {
+    ucs2_t skey[256] = {0};
+    ucs2_t sval[ARG_MAX_CHARS] = {0};
+    ucs2_split_eq(survivors[si], skey, 256, sval, ARG_MAX_CHARS);
+    GConfig_SetString(gcfg, section, skey, sval, file, 0);
+  }
+
+  // Flush wit bRead=1: write to disk, preserve cache
+  GConfig_Flush(gcfg, 1, file);
+
+  return deleted_cnt;
 }
 
 // ============================================================================
@@ -1615,6 +1708,104 @@ static void cmd_cfg_get_section(void) {
 }
 
 /*
+ * Deletes entries matching Section+Key+Value from GConfig.
+ * Args: Section, Key, Value [, File]
+ * File: optional, empty string uses GConfig default.
+ */
+static void cmd_cfg_delete_str(void) {
+  if (g_socket_slot.req.argc < 3) {
+    hook_socket_finish_err("args: Section, Key, Value [, File]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t val[ARG_MAX_CHARS] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+  arg_to_ucs2(2, val, ARG_MAX_CHARS);
+
+  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
+    arg_to_ucs2(3, file, 256);
+    fp = file;
+  }
+
+  int deleted = cfg_delete_entries(gcfg, sec, key, val, fp, 0);
+  if (deleted == 0) {
+    hook_socket_finish_err("no matching entries found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"deleted\":");
+  jb_int(&jb, deleted);
+  jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Deletes all entries matching Section+Key from GConfig (value ignored).
+ * Args: Section, Key [, File [, Max]]
+ * File: optional, empty string uses GConfig default.
+ * Max:  optional, 0 = delete all matches, N = delete at
+ * most N occurrences.
+ */
+static void cmd_cfg_delete_key_str(void) {
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: Section, Key [, File [, Max]]");
+    return;
+  }
+
+  void *gcfg = get_gconfig();
+  if (!gcfg) {
+    hook_socket_finish_err("GConfig not ready");
+    return;
+  }
+
+  ucs2_t sec[256] = {0};
+  ucs2_t key[256] = {0};
+  ucs2_t file[256] = {0};
+  ucs2_t *fp = NULL;
+
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+
+  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
+    arg_to_ucs2(2, file, 256);
+    fp = file;
+  }
+
+  int max_del = g_socket_slot.req.argc > 3
+                    ? (int)strtol(g_socket_slot.req.args[3], NULL, 10)
+                    : 0;
+
+  int deleted = cfg_delete_entries(gcfg, sec, key, NULL, fp, max_del);
+  if (deleted == 0) {
+    hook_socket_finish_err("no matching entries found");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"deleted\":");
+  jb_int(&jb, deleted);
+  jb_raw(&jb, "}}");
+
+  hook_socket_finish_json(&jb);
+}
+
+/*
  * Flushes GConfig in-memory cache to disk.
  * Args: [File]
  * File: optional, empty string flushes all files.
@@ -1895,6 +2086,16 @@ void hook_command_dispatch(void) {
 
   if (strcmp(cmd, "cfggetsection") == 0) {
     cmd_cfg_get_section();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgdeletestr") == 0) {
+    cmd_cfg_delete_str();
+    return;
+  }
+
+  if (strcmp(cmd, "cfgdeletekeystr") == 0) {
+    cmd_cfg_delete_key_str();
     return;
   }
 }

@@ -1,5 +1,7 @@
 
+#include <stddef.h>
 #include <string.h>
+#include <wctype.h>
 
 #include "hook_ucs2.h"
 
@@ -85,4 +87,55 @@ size_t utf8_to_ucs2(const char *src, ucs2_t *dst, size_t dst_len) {
   }
   dst[di] = 0;
   return di;
+}
+
+/*
+ * Case-insensitive comparison of two UCS2 strings.
+ * Uses towlower on each code unit, sufficient for ASCII key names.
+ * Returns 0 if equal, non-zero otherwise.
+ */
+int ucs2_icmp(const ucs2_t *a, const ucs2_t *b) {
+  while (*a && *b) {
+    ucs2_t ca = (ucs2_t)towlower((wchar_t)*a);
+    ucs2_t cb = (ucs2_t)towlower((wchar_t)*b);
+    if (ca != cb)
+      return (int)ca - (int)cb;
+    a++;
+    b++;
+  }
+  return (int)towlower((wchar_t)*a) - (int)towlower((wchar_t)*b);
+}
+
+/*
+ * Split a "Key=Value" UCS2 entry on the first '='.
+ * Writes key into key_buf (up to key_len chars) and value into val_buf
+ * (up to val_len chars). Both are NUL-terminated.
+ * Returns 1 if '=' was found, 0 if not (entry copied to key_buf as-is).
+ */
+int ucs2_split_eq(const ucs2_t *entry, ucs2_t *key_buf, int key_len,
+                         ucs2_t *val_buf, int val_len) {
+  int i = 0;
+  while (entry[i] && entry[i] != (ucs2_t)'=')
+    i++;
+  if (!entry[i]) {
+    // No '=' found
+    int n = i < key_len - 1 ? i : key_len - 1;
+    memcpy(key_buf, entry, n * sizeof(ucs2_t));
+    key_buf[n] = 0;
+    val_buf[0] = 0;
+    return 0;
+  }
+
+  int kn = i < key_len - 1 ? i : key_len - 1;
+  memcpy(key_buf, entry, kn * sizeof(ucs2_t));
+  key_buf[kn] = 0;
+
+  const ucs2_t *vstart = entry + i + 1;
+  int vn = 0;
+  while (vstart[vn] && vn < val_len - 1)
+    vn++;
+
+  memcpy(val_buf, vstart, vn * sizeof(ucs2_t));
+  val_buf[vn] = 0;
+  return 1;
 }
