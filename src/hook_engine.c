@@ -1,14 +1,17 @@
 #include <stddef.h>
+#include <stdint.h>
 
 #include "hook_cmd.h"
 #include "hook_engine.h"
 #include "hook_log.h"
+#include "hook_policy.h"
 #include "hook_socket.h"
+#include "hook_ucs2.h"
 
 // ============================================================================
 // ENGINE DEFINES
 // ============================================================================
-#define GAME_STARTED_PROBE_INTERVAL 30 // Check once per second at 30 Hz
+#define GAME_STARTED_PROBE_INTERVAL 30  // Check once per second at 30 Hz
 
 // ============================================================================
 // ENGINE STATIC STATE
@@ -54,26 +57,26 @@ APlayerController_eventClientMessage_fn APlayerController_eventClientMessage =
 Cast_APlayerController_fn Cast_APlayerController =
     (Cast_APlayerController_fn)ADDR_Cast_APlayerController;
 
-FString_ctor_fn FString_ctor = (FString_ctor_fn)ADDR_FString_ctor_wchar;
+FString_ctor_fn FString_ctor = (FString_ctor_fn)ADDR_FString_ctor;
 FString_dtor_fn FString_dtor = (FString_dtor_fn)ADDR_FString_dtor;
 
 GConfig_GetString_fn GConfig_GetString =
     (GConfig_GetString_fn)ADDR_GConfig_GetString;
 GConfig_SetString_fn GConfig_SetString =
     (GConfig_SetString_fn)ADDR_GConfig_SetString;
-GConfig_GetInt_fn GConfig_GetInt = 
+GConfig_GetInt_fn GConfig_GetInt =
     (GConfig_GetInt_fn)ADDR_GConfig_GetInt;
-GConfig_SetInt_fn GConfig_SetInt = 
+GConfig_SetInt_fn GConfig_SetInt =
     (GConfig_SetInt_fn)ADDR_GConfig_SetInt;
 GConfig_GetFloat_fn GConfig_GetFloat =
     (GConfig_GetFloat_fn)ADDR_GConfig_GetFloat;
 GConfig_SetFloat_fn GConfig_SetFloat =
     (GConfig_SetFloat_fn)ADDR_GConfig_SetFloat;
-GConfig_GetBool_fn GConfig_GetBool = 
+GConfig_GetBool_fn GConfig_GetBool =
     (GConfig_GetBool_fn)ADDR_GConfig_GetBool;
-GConfig_SetBool_fn GConfig_SetBool = 
+GConfig_SetBool_fn GConfig_SetBool =
     (GConfig_SetBool_fn)ADDR_GConfig_SetBool;
-GConfig_Flush_fn GConfig_Flush = 
+GConfig_Flush_fn GConfig_Flush =
     (GConfig_Flush_fn)ADDR_GConfig_Flush;
 GConfig_GetSection_fn GConfig_GetSection =
     (GConfig_GetSection_fn)ADDR_GConfig_GetSection;
@@ -95,11 +98,13 @@ static void update_game_state(void) {
                    cur_level);
     game_started = 0;
     game_started_tick_count = 0;
+    hook_log_debug("game_started reset\n");
+    hook_policy_on_level_change();
   }
   if (cur_level)
     last_level_ptr = cur_level;
 
-  // game_started probe, once per GAME_STARTED_PROBE_INTERVAL ticks
+  // Increment every tick, probe fires every GAME_STARTED_PROBE_INTERVAL ticks
   if (!game_started && cur_level) {
     if ((game_started_tick_count++ % GAME_STARTED_PROBE_INTERVAL) == 0) {
       void *gri = find_gri();
@@ -125,6 +130,7 @@ void hook_engine_tick(void *self) {
   }
 
   update_game_state();
+  hook_policy_update_bans();
 
   if (hook_socket_poll() && !is_server_busy())
     hook_command_dispatch();
@@ -164,26 +170,7 @@ int is_game_started(void) {
  * Names shorter than 16 chars exit immediately without scanning.
  */
 int is_player_controller(const ucs2_t *name) {
-  if (!name)
-    return 0;
-
-  int len = 0;
-  while (name[len])
-    len++;
-
-  if (len < 16)
-    return 0;
-
-  for (int j = 0; j <= len - 16; j++) {
-    if (name[j] == 'P' && name[j + 1] == 'l' && name[j + 2] == 'a' &&
-        name[j + 3] == 'y' && name[j + 4] == 'e' && name[j + 5] == 'r' &&
-        name[j + 6] == 'C' && name[j + 7] == 'o' && name[j + 8] == 'n' &&
-        name[j + 9] == 't' && name[j + 10] == 'r' && name[j + 11] == 'o' &&
-        name[j + 12] == 'l' && name[j + 13] == 'l' && name[j + 14] == 'e' &&
-        name[j + 15] == 'r')
-      return 1;
-  }
-  return 0;
+  return name && ucs2_contains_ascii(name, "PlayerController");
 }
 
 /* Returns 1 if the actor class name starts with "Zombie" and is not a
@@ -191,16 +178,11 @@ int is_player_controller(const ucs2_t *name) {
  * ZombiePathNode and ZombieVolume actors placed by the mapper -> exclude them.
  */
 int is_zed_actor(const ucs2_t *name) {
-  if (!name)
+  if (!name || !ucs2_starts_with_ascii(name, "Zombie")) 
     return 0;
-  if (!(name[0] == 'Z' && name[1] == 'o' && name[2] == 'm' && name[3] == 'b' &&
-        name[4] == 'i' && name[5] == 'e'))
+  if (ucs2_starts_with_ascii(name + 6, "Path")) 
     return 0;
-  // Exclude ZombiePathNode
-  if (name[6] == 'P' && name[7] == 'a' && name[8] == 't' && name[9] == 'h')
-    return 0;
-  // Exclude ZombieVolume
-  if (name[6] == 'V' && name[7] == 'o' && name[8] == 'l' && name[9] == 'u')
+  if (ucs2_starts_with_ascii(name + 6, "Volu")) 
     return 0;
   return 1;
 }
@@ -239,8 +221,8 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
  * Dereferences ADDR_GCONFIG_PTR, returns NULL if not yet initialized.
  * All GConfig_* calls require a non-NULL return value.
  */
-void* get_gconfig(void) {
-  return *(void**)ADDR_GCONFIG_PTR;
+void *get_gconfig(void) {
+  return *(void **)ADDR_GCONFIG_PTR;
 }
 
 /*
@@ -263,13 +245,8 @@ void *find_gri(void) {
       continue;
 
     const ucs2_t *name = UObject_GetName(actor);
-    if (!name)
-      continue;
-
-    for (int j = 0; name[j]; j++)
-      if (name[j] == 'G' && name[j + 1] == 'a' && name[j + 2] == 'm' &&
-          name[j + 3] == 'e' && name[j + 4] == 'R')
-        return actor;
+    if (name && ucs2_contains_ascii(name, "GameR")) 
+      return actor;
   }
   return NULL;
 }
@@ -299,24 +276,8 @@ void *find_access_control(void) {
       continue;
 
     const ucs2_t *name = UObject_GetName(actor);
-    if (!name)
-      continue;
-
-    // Match "AccessControl"
-    // 13 chars, check length first
-    int len = 0;
-    while (name[len])
-      len++;
-    if (len < 13)
-      continue;
-
-    for (int j = 0; j <= len - 13; j++)
-      if (name[j] == 'A' && name[j + 1] == 'c' && name[j + 2] == 'c' &&
-          name[j + 3] == 'e' && name[j + 4] == 's' && name[j + 5] == 's' &&
-          name[j + 6] == 'C' && name[j + 7] == 'o' && name[j + 8] == 'n' &&
-          name[j + 9] == 't' && name[j + 10] == 'r' && name[j + 11] == 'o' &&
-          name[j + 12] == 'l')
-        return actor;
+    if (name && ucs2_contains_ascii(name, "AccessControl")) 
+      return actor;
   }
   return NULL;
 }

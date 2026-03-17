@@ -33,8 +33,8 @@
  * FString memory management
  * Confirmed: eventBroadcast @0x8129eec
  */
-#define ADDR_FString_ctor_wchar 0x0804e1fe
-#define ADDR_FString_dtor       0x0804e4a6
+#define ADDR_FString_ctor  0x0804e1fe
+#define ADDR_FString_dtor  0x0804e4a6
 
 /*
  * GLog: FOutputDevice* passed to UGameEngine::Exec as output device
@@ -365,7 +365,7 @@ int is_game_started(void);
 int is_player_controller(const ucs2_t *name);
 int is_zed_actor(const ucs2_t *name);
 int get_level_objects(void **out_level_info, void **out_game_info);
-void* get_gconfig(void);
+void *get_gconfig(void);
 void *find_gri(void);
 void *find_access_control(void);
 

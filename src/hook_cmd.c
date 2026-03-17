@@ -7,6 +7,7 @@
 #include "hook_engine.h"
 #include "hook_json.h"
 #include "hook_log.h"
+#include "hook_policy.h"
 #include "hook_socket.h"
 #include "hook_ucs2.h"
 #include "kfds_hook.h"
@@ -25,6 +26,23 @@
 #define CFG_BUF_CHARS        1024 // max config value / section / key (UTF-8)
 #define CFG_DEL_SEC_BUF      (CFG_BUF_CHARS * 4)
 #define CFG_DEL_MAX_ENTRIES  512
+
+// ============================================================================
+// COMMAND STATIC STATE
+// ============================================================================
+/*
+ * UCS-2 literals for [Engine.AccessControl] section and file.
+ * Shared by all ban commands.
+ */
+static const ucs2_t BAN_SECTION[] = {'E', 'n', 'g', 'i', 'n', 'e', '.',
+                                     'A', 'c', 'c', 'e', 's', 's', 'C',
+                                     'o', 'n', 't', 'r', 'o', 'l', 0};
+static const ucs2_t BAN_FILE[] = {'K', 'i', 'l', 'l', 'i', 'n', 'g',
+                                  'F', 'l', 'o', 'o', 'r', 0};
+static const ucs2_t BAN_KEY_IP[] = {'I', 'P', 'P', 'o', 'l', 'i',
+                                    'c', 'i', 'e', 's', 0};
+static const ucs2_t BAN_KEY_STEAM[] = {'B', 'a', 'n', 'n', 'e',
+                                       'd', 'I', 'D', 's', 0};
 
 // ============================================================================
 // COMMAND HELPERS
@@ -205,6 +223,36 @@ static int cfg_delete_entries(void *gcfg, const ucs2_t *section,
   GConfig_Flush(gcfg, 1, file);
 
   return deleted_cnt;
+}
+
+/*
+ * Removes a single FString entry from a TArrayFString by index.
+ * Destructs the entry, shifts remaining entries left, zeroes the last slot.
+ * Safe: never reallocates or modifies Data/Max.
+ */
+static void tarray_fstring_remove(TArrayFString *arr, int i) {
+  FString_dtor(&arr->Data[i]);
+  int remaining = arr->Num - i - 1;
+  if (remaining > 0) {
+    memmove(&arr->Data[i], &arr->Data[i + 1],
+            (size_t)remaining * sizeof(FString));
+  }
+  memset(&arr->Data[arr->Num - 1], 0, sizeof(FString));
+  arr->Num--;
+}
+
+/*
+ * Extracts the SteamID64 prefix from a "<steamid64> <name>" entry.
+ * Copies everything before the first space into dst, or the full string
+ * if no space is found. Always NUL-terminates. dst_size must be > 0.
+ */
+static void extract_steamid_prefix(const char *src, char *dst, size_t dst_size) {
+    const char *sp = strchr(src, ' ');
+    size_t len = sp ? (size_t)(sp - src) : strlen(src);
+    if (len >= dst_size)
+        len = dst_size - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
 }
 
 // ============================================================================
@@ -976,6 +1024,372 @@ static void cmd_get_banned_ids(void) {
   jb_raw(&jb, "]}");
 
   hook_socket_finish_json(&jb);
+}
+
+/*
+ * Adds an IP ban to the live IPPolicies TArray and persists to GConfig.
+ * Args: IP (e.g. "1.2.3.4" or "1.2.3.*")
+ * Entry format: "DENY;<ip>"
+ * Takes effect immediately.
+ * Does NOT kick currently connected players.
+ * Persisted via CfgSetStr + CfgFlush.
+ */
+static void cmd_add_ip_ban(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: IP");
+    return;
+  }
+
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
+  hook_log_debug("AddIPBan: IPPolicies Data=%p Num=%d Max=%d\n",
+                 (void *)arr->Data, arr->Num, arr->Max);
+
+  if (!arr->Data || arr->Num >= arr->Max) {
+    hook_socket_finish_err("IPPolicies TArray full or uninitialized");
+    return;
+  }
+
+  if (strlen(g_socket_slot.req.args[0]) > 45) {
+    hook_socket_finish_err("IP too long");
+    return;
+  }
+
+  // Build "DENY;<ip>" policy string
+  static const char prefix[] = "DENY;";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  const size_t ip_len = strlen(g_socket_slot.req.args[0]);
+  const size_t copy_len =
+      ip_len < (64 - prefix_len - 1) ? ip_len : (64 - prefix_len - 1);
+  char policy_utf8[64];
+
+  memcpy(policy_utf8, prefix, prefix_len);
+  memcpy(policy_utf8 + prefix_len, g_socket_slot.req.args[0], copy_len);
+  policy_utf8[prefix_len + copy_len] = '\0';
+
+  ucs2_t policy_ucs2[64] = {0};
+  utf8_to_ucs2(policy_utf8, policy_ucs2, 64);
+
+  // Write new FString entry into the next TArray slot */
+  FString_ctor(&arr->Data[arr->Num], policy_ucs2);
+  arr->Num++;
+  hook_log_debug("AddIPBan: added \"%s\" at slot %d\n", policy_utf8,
+                 arr->Num - 1);
+
+  // Record in session list for repopulate_bans() after ServerTravel
+  hook_policy_add_session_ip_ban(policy_utf8);
+
+  // Persist to GConfig
+  ucs2_t val[64] = {0};
+  utf8_to_ucs2(policy_utf8, val, 64);
+  void *gcfg = get_gconfig();
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, val, BAN_FILE, 0);
+  GConfig_Flush(gcfg, 1, BAN_FILE);
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Removes an IP ban from the live IPPolicies TArray, GConfig, and session list.
+ * Args: IP (e.g. "1.2.3.4" or "1.2.3.*")
+ * Matches "DENY;<ip>" entries (case-insensitive prefix).
+ * Does NOT unban currently connected players.
+ * Returns error if no matching ban found in either live or GConfig.
+ */
+static void cmd_remove_ip_ban(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: IP");
+    return;
+  }
+
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  // Build "DENY;<ip>" to match against
+  static const char prefix[] = "DENY;";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  const size_t ip_len = strlen(g_socket_slot.req.args[0]);
+  const size_t copy_len = ip_len < (ARG_MAX_CHARS - prefix_len - 1)
+                              ? ip_len
+                              : (ARG_MAX_CHARS - prefix_len - 1);
+  char policy_utf8[ARG_MAX_CHARS];
+  memcpy(policy_utf8, prefix, prefix_len);
+  memcpy(policy_utf8 + prefix_len, g_socket_slot.req.args[0], copy_len);
+  policy_utf8[prefix_len + copy_len] = '\0';
+
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
+  hook_log_debug("RemoveIPBan: IPPolicies Num=%d searching for \"%s\"\n",
+                 arr->Num, policy_utf8);
+
+  if (!arr->Data || arr->Num <= 0) {
+    hook_socket_finish_err("IPPolicies TArray empty or uninitialized");
+    return;
+  }
+
+  // Live TArray removal, scan backwards for safe in-place removal
+  int live_removed = 0;
+  for (int i = arr->Num - 1; i >= 0; i--) {
+    FString *entry = &arr->Data[i];
+    if (!entry->Data || entry->Num <= 0 || entry->Num > 512)
+      continue;
+    char utf8[128] = {0};
+    ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
+    if (strcasecmp(utf8, policy_utf8) == 0) {
+      hook_log_debug("RemoveIPBan: removing live slot %d \"%s\"\n", i, utf8);
+      tarray_fstring_remove(arr, i);
+      live_removed++;
+    }
+  }
+
+  // GConfig removal
+  ucs2_t val[64] = {0};
+  utf8_to_ucs2(policy_utf8, val, 64);
+  void *gcfg = get_gconfig();
+  int cfg_removed =
+      cfg_delete_entries(gcfg, BAN_SECTION, BAN_KEY_IP, val, BAN_FILE, 0);
+
+  // Session list removal, shift in place
+  int sess_removed = 0;
+  for (int i = hook_policy_get_session_ip_ban_cnt() - 1; i >= 0; i--) {
+    if (strcasecmp(hook_policy_get_session_ip_ban(i), policy_utf8) == 0) {
+      hook_policy_remove_session_ip_ban(i);
+      sess_removed++;
+    }
+  }
+
+  hook_log_debug("RemoveIPBan: live=%d cfg=%d session=%d\n", live_removed,
+                 cfg_removed, sess_removed);
+
+  if (live_removed == 0 && cfg_removed == 0) {
+    hook_socket_finish_err("no matching ban found");
+    return;
+  }
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Adds a Steam ban to the live BannedIDs TArray and persists to GConfig.
+ * Args:          SteamID64 [, Name]
+ * Name:          optional, defaults to "HookBan".
+ * Entry format: "<steamid64> <name>"
+ * Takes effect immediately.
+ * Does NOT kick currently connected players.
+ * Persisted via CfgSetStr + CfgFlush.
+ */
+static void cmd_add_steam_ban(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: SteamID64 [, Name]");
+    return;
+  }
+
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  hook_log_debug("AddSteamBan: BannedIDs Data=%p Num=%d Max=%d\n",
+                 (void *)arr->Data, arr->Num, arr->Max);
+
+  // Bootstrap uninitialized TArray
+  if (!arr->Data || arr->Max == 0) {
+    arr->Data =
+        (FString *)calloc(POLICY_BANNEDIDS_INITIAL_MAX, sizeof(FString));
+    if (!arr->Data) {
+      hook_socket_finish_err("BannedIDs TArray alloc failed");
+      return;
+    }
+    arr->Num = 0;
+    arr->Max = POLICY_BANNEDIDS_INITIAL_MAX;
+    hook_log_debug("AddSteamBan: bootstrapped BannedIDs TArray Max=%d\n",
+                   POLICY_BANNEDIDS_INITIAL_MAX);
+  }
+
+  if (arr->Num >= arr->Max) {
+    hook_socket_finish_err("BannedIDs TArray full");
+    return;
+  }
+
+  // Build "<steamid64> <n>" entry
+  const char *name =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0])
+          ? g_socket_slot.req.args[1]
+          : "HookBan";
+
+  char id_buf[32] = {0};
+  char name_buf[64] = {0};
+  const size_t id_len = strlen(g_socket_slot.req.args[0]);
+  const size_t name_len = strlen(name);
+  memcpy(id_buf, g_socket_slot.req.args[0], id_len < 31 ? id_len : 31);
+  memcpy(name_buf, name, name_len < 63 ? name_len : 63);
+
+  // "<id> <n>\0"
+  char entry_utf8[ARG_MAX_CHARS];
+  const size_t id_part = strlen(id_buf);
+  const size_t name_part = strlen(name_buf);
+  memcpy(entry_utf8, id_buf, id_part);
+  entry_utf8[id_part] = ' ';
+  memcpy(entry_utf8 + id_part + 1, name_buf, name_part);
+  entry_utf8[id_part + 1 + name_part] = '\0';
+
+  ucs2_t entry_ucs2[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(entry_utf8, entry_ucs2, ARG_MAX_CHARS);
+
+  FString_ctor(&arr->Data[arr->Num], entry_ucs2);
+  arr->Num++;
+  hook_log_debug("AddSteamBan: added \"%s\" at slot %d\n", entry_utf8,
+                 arr->Num - 1);
+
+  // Record in session list for repopulate_bans() after ServerTravel
+  hook_policy_add_session_steam_ban(entry_utf8);
+
+  // Persist to GConfig
+  ucs2_t val[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(entry_utf8, val, ARG_MAX_CHARS);
+  void *gcfg = get_gconfig();
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, val, BAN_FILE, 0);
+  GConfig_Flush(gcfg, 1, BAN_FILE);
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Removes a Steam ban from the live BannedIDs TArray, GConfig,
+ * and session list.
+ * Args: SteamID64
+ * Matches by SteamID prefix only, stored name is ignored.
+ * Does NOT unban currently connected players.
+ * Returns error if no matching ban found in either live or GConfig.
+ */
+static void cmd_remove_steam_ban(void) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: SteamID64");
+    return;
+  }
+
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  const char *target_id = g_socket_slot.req.args[0];
+
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  hook_log_debug("RemoveSteamBan: BannedIDs Num=%d searching for \"%s\"\n",
+                 arr->Num, target_id);
+
+  if (!arr->Data || arr->Num <= 0) {
+    hook_socket_finish_err("BannedIDs TArray empty or uninitialized");
+    return;
+  }
+
+  // Live TArray removal, scan backwards
+  int live_removed = 0;
+  for (int i = arr->Num - 1; i >= 0; i--) {
+    FString *entry = &arr->Data[i];
+    if (!entry->Data || entry->Num <= 0 || entry->Num > 512)
+      continue;
+    char utf8[ARG_MAX_CHARS] = {0};
+    ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
+    char id_part[32] = {0};
+    extract_steamid_prefix(utf8, id_part, sizeof(id_part));
+    if (strcmp(id_part, target_id) == 0) {
+      hook_log_debug("RemoveSteamBan: removing live slot %d \"%s\"\n", i, utf8);
+      tarray_fstring_remove(arr, i);
+      live_removed++;
+    }
+  }
+
+  // GConfig removal, read section, find entries starting with target_id,
+  // delete each by exact value (including stored name) via cfg_delete_entries
+  // Re-read after each deletion to avoid stale buffer pointers
+  void *gcfg = get_gconfig();
+  int cfg_removed = 0;
+  ucs2_t raw[CFG_BUF_CHARS * 4];
+
+  int scanning = 1;
+  while (scanning) {
+    memset(raw, 0, sizeof(raw));
+    GConfig_GetSection(gcfg, BAN_SECTION, raw, CFG_BUF_CHARS * 4, BAN_FILE);
+    scanning = 0;
+
+    int ri = 0;
+    while (ri < CFG_BUF_CHARS * 4 - 1) {
+      if (raw[ri] == 0)
+        break;
+      int start = ri;
+      while (raw[ri])
+        ri++;
+      int elen = ri - start;
+      ri++;
+      if (elen <= 0 || elen >= ARG_MAX_CHARS * 2)
+        continue;
+
+      ucs2_t entry[ARG_MAX_CHARS * 2];
+      memcpy(entry, raw + start, elen * sizeof(ucs2_t));
+      entry[elen] = 0;
+
+      ucs2_t ekey[256] = {0};
+      ucs2_t eval[ARG_MAX_CHARS] = {0};
+      ucs2_split_eq(entry, ekey, 256, eval, ARG_MAX_CHARS);
+
+      if (ucs2_icmp(ekey, BAN_KEY_STEAM) != 0)
+        continue;
+
+      char val_utf8[ARG_MAX_CHARS] = {0};
+      ucs2_to_utf8(eval, val_utf8, sizeof(val_utf8));
+      char id_part[32] = {0};
+      extract_steamid_prefix(val_utf8, id_part, sizeof(id_part));
+      if (strcmp(id_part, target_id) != 0)
+        continue;
+
+      hook_log_debug("RemoveSteamBan: removing from GConfig: \"%s\"\n",
+                     val_utf8);
+      cfg_delete_entries(gcfg, BAN_SECTION, BAN_KEY_STEAM, eval, BAN_FILE, 0);
+      cfg_removed++;
+      scanning = 1; // re-read after mutation
+      break;
+    }
+  }
+
+  // Session list removal
+  int sess_removed = 0;
+  for (int i = hook_policy_get_session_steam_ban_cnt() - 1; i >= 0; i--) {
+    const char *entry = hook_policy_get_session_steam_ban(i);
+    if (!entry)
+      continue;
+    char id_part[32] = {0};
+    extract_steamid_prefix(entry, id_part, sizeof(id_part));
+    if (strcmp(id_part, target_id) == 0) {
+      hook_policy_remove_session_steam_ban(i);
+      sess_removed++;
+    }
+  }
+
+  hook_log_debug("RemoveSteamBan: live=%d cfg=%d session=%d\n", live_removed,
+                 cfg_removed, sess_removed);
+
+  if (live_removed == 0 && cfg_removed == 0) {
+    hook_socket_finish_err("no matching ban found");
+    return;
+  }
+
+  hook_socket_finish_ok();
 }
 
 // ============================================================================
@@ -1969,6 +2383,30 @@ void hook_command_dispatch(void) {
   // BannedIDs - Get the current Steam ID ban list
   if (strcmp(cmd, "bannedids") == 0) {
     cmd_get_banned_ids();
+    return;
+  }
+
+  // BanIP - Add a new ban by IP to the banlist
+  if (strcmp(cmd, "banip") == 0) {
+    cmd_add_ip_ban();
+    return;
+  }
+
+  // UnbanIP - Remove an existing IP from the ban list
+  if (strcmp(cmd, "unbanip") == 0) {
+    cmd_remove_ip_ban();
+    return;
+  }
+
+  // Ban - Add a new ban by SteamID64 to the banlist
+  if (strcmp(cmd, "banid") == 0) {
+    cmd_add_steam_ban();
+    return;
+  }
+
+  // Unban - Remove an existing SteamID64 from the ban list
+  if (strcmp(cmd, "unbanid") == 0) {
+    cmd_remove_steam_ban();
     return;
   }
 

@@ -1,4 +1,3 @@
-
 #include <stddef.h>
 #include <string.h>
 #include <wctype.h>
@@ -113,7 +112,7 @@ int ucs2_icmp(const ucs2_t *a, const ucs2_t *b) {
  * Returns 1 if '=' was found, 0 if not (entry copied to key_buf as-is).
  */
 int ucs2_split_eq(const ucs2_t *entry, ucs2_t *key_buf, int key_len,
-                         ucs2_t *val_buf, int val_len) {
+                  ucs2_t *val_buf, int val_len) {
   int i = 0;
   while (entry[i] && entry[i] != (ucs2_t)'=')
     i++;
@@ -138,4 +137,54 @@ int ucs2_split_eq(const ucs2_t *entry, ucs2_t *key_buf, int key_len,
   memcpy(val_buf, vstart, vn * sizeof(ucs2_t));
   val_buf[vn] = 0;
   return 1;
+}
+
+/*
+ * Returns the length of a UCS-2 string (number of code units, excluding NUL).
+ */
+int ucs2_len(const ucs2_t *s) {
+  int n = 0;
+  while (s[n])
+    n++;
+  return n;
+}
+
+/*
+ * Returns 1 if the UCS-2 string s starts with the ASCII prefix p.
+ * Comparison is case-sensitive.
+ */
+int ucs2_starts_with_ascii(const ucs2_t *s, const char *p) {
+  if (!s || !p)
+    return 0;
+
+  while (*p) {
+    if (*s != (ucs2_t)(unsigned char)*p)
+      return 0;
+    s++;
+    p++;
+  }
+  return 1;
+}
+
+/*
+ * Returns 1 if the UCS-2 string s contains the ASCII substring p.
+ * Comparison is case-sensitive.
+ * Returns 0 if s is shorter than p.
+ */
+int ucs2_contains_ascii(const ucs2_t *s, const char *p) {
+  if (!s || !p)
+    return 0;
+
+  int plen = (int)strlen(p);
+  int slen = ucs2_len(s);
+  if (slen < plen)
+    return 0;
+  for (int i = 0; i <= slen - plen; i++) {
+    int j = 0;
+    while (j < plen && s[i + j] == (ucs2_t)(unsigned char)p[j])
+      j++;
+    if (j == plen)
+      return 1;
+  }
+  return 0;
 }
