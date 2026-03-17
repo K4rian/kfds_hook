@@ -237,7 +237,7 @@ void cmd_debug_actors_dump(void) {
     fclose(f);
     hook_socket_finish_err("GGameEngine is NULL");
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -294,7 +294,7 @@ void cmd_debug_pc_dump(void) {
     fclose(f);
     hook_socket_finish_err("GGameEngine is NULL");
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -307,7 +307,7 @@ void cmd_debug_pc_dump(void) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
       continue; /* skip non-human PCs (WebAdmin, bots) */
 
@@ -366,7 +366,7 @@ void cmd_debug_pcpawn_dump(void) {
     fclose(f);
     hook_socket_finish_err("GGameEngine is NULL");
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -379,11 +379,11 @@ void cmd_debug_pcpawn_dump(void) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
       continue; // skip non-human PCs
 
-    void *pawn = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PAWN);
+    void *pawn = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_Pawn);
     if (!pawn) {
       fprintf(f, "PC[%d]=%p | Pawn is NULL (dead/spectating)\n\n", dumped,
               actor);
@@ -444,7 +444,7 @@ void cmd_debug_pcnetconn_dump(void) {
     fclose(f);
     hook_socket_finish_err("GGameEngine is NULL");
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -454,7 +454,7 @@ void cmd_debug_pcnetconn_dump(void) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
       continue;
 
@@ -615,4 +615,5 @@ void hook_debug_command_dispatch(char* cmd) {
     return;
   }
 }
+
 #endif /* DEBUG */

@@ -3,6 +3,7 @@
 
 #include "hook_config.h"
 #include "hook_log.h"
+#include "hook_sha256.h"
 #include "inih/ini.h"
 
 // ============================================================================
@@ -10,11 +11,12 @@
 // ============================================================================
 hook_config_t g_config = {
     .hook_enabled = 1,
-    #ifdef DEBUG
+    .ucc_checksum = KFDS_UCC_CHECKSUM,
+#ifdef DEBUG
     .log_level = HOOK_LOG_LEVEL_DEBUG,
-    #else
+#else
     .log_level = HOOK_LOG_LEVEL_INFO,
-    #endif
+#endif
     .log_file = "",
     .socket_path = "/tmp/kfds_hook.sock",
     .socket_maxpoll = 100,
@@ -34,6 +36,9 @@ static int config_handler(void *user, const char *section, const char *name,
 #define MATCH(s, n) (strcmp(section, s) == 0 && strcmp(name, n) == 0)
   if (MATCH("hook", "hook_enabled")) {
     c->hook_enabled = atoi(value);
+  } else if (MATCH("hook", "ucc_checksum")) {
+    strncpy(c->ucc_checksum, value, 64);
+    c->ucc_checksum[64] = '\0';
   } else if (MATCH("hook", "log_level")) {
     if (strcmp(value, "debug") == 0)
       g_config.log_level = HOOK_LOG_LEVEL_DEBUG;
@@ -87,5 +92,28 @@ void hook_load_config(void) {
   } else {
     hook_log_info("config loaded from %s\n", path);
   }
-  hook_log_debug("log_level=%d\n", g_config.log_level);
+
+  // Verify ucc-bin-real checksum if set
+  if (g_config.ucc_checksum[0]) {
+    char actual[65];
+    if (!sha256_file("/proc/self/exe", actual)) {
+      hook_log_error("FATAL: could not read /proc/self/exe for checksum\n");
+      g_config.hook_enabled = 0;
+    } else if (strcasecmp(actual, g_config.ucc_checksum) != 0) {
+      hook_log_error("FATAL: binary checksum mismatch!\n");
+      hook_log_error("  expected: %s\n", g_config.ucc_checksum);
+      hook_log_error("  actual:   %s\n", actual);
+      hook_log_error("  Hook installation aborded. Update ucc_checksum in "
+                     "kfds_hook.ini.\n");
+      g_config.hook_enabled = 0;
+    } else {
+      hook_log_debug("checksum OK: %s\n", actual);
+    }
+  }
+
+  hook_log_debug("log_level=%d log_file=%s socket=%s maxpoll=%d/s deadline=%ds "
+                 "debug_dump_dir=%s\n",
+                 g_config.log_level, g_config.log_file, g_config.socket_path,
+                 g_config.socket_maxpoll, g_config.socket_deadline,
+                 g_config.debug_dump_dir);
 }

@@ -426,7 +426,7 @@ static void cmd_get_server_info(void) {
 
 static void cmd_get_level_url(void) {
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   if (!level) {
     hook_socket_finish_err("level not ready");
     return;
@@ -508,7 +508,7 @@ static void cmd_get_level_url(void) {
  */
 static void cmd_get_players(void) {
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -533,7 +533,7 @@ static void cmd_get_players(void) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     uint64_t steamid =
         netconn ? *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID)
                 : 0;
@@ -555,7 +555,7 @@ static void cmd_get_players(void) {
     // TODO: assists
 
     // Health and armor from Pawn: -1 if dead/spectating (Pawn == NULL)
-    void *pawn = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PAWN);
+    void *pawn = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_Pawn);
     int health = -1;
     int armor = -1;
     if (pawn) {
@@ -652,7 +652,7 @@ static void cmd_kick(void *game_info) {
   }
 
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -675,7 +675,7 @@ static void cmd_kick(void *game_info) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
       continue;
 
@@ -713,7 +713,7 @@ static void cmd_send_player_message(void) {
   }
 
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -745,7 +745,7 @@ static void cmd_send_player_message(void) {
       continue;
 
     void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NETCONN);
+        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
       continue;
 
@@ -777,7 +777,7 @@ static void cmd_send_player_message(void) {
  */
 static void cmd_get_zeds(void) {
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 
@@ -832,7 +832,7 @@ static void cmd_get_zeds(void) {
  */
 static void cmd_kill_zeds(void) {
   void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_LEVEL_OFFSET);
+      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   void **actors = *(void ***)((uint8_t *)level + 0x30);
   int actor_count = *(int *)((uint8_t *)level + 0x34);
 

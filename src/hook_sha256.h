@@ -1,9 +1,9 @@
-#ifndef KFDS_HOOK_H
-#define KFDS_HOOK_H
+#ifndef HOOK_SHA256_H
+#define HOOK_SHA256_H
 
 // ============================================================================
-// KFDS_HOOK DEFINES
+// SHA256
 // ============================================================================
-#define HOOK_REVISION "21"
+int sha256_file(const char *path, char out_hex[65]);
 
-#endif /* KFDS_HOOK_H */
+#endif /* HOOK_SHA256_H */

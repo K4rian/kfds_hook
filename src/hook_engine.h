@@ -78,8 +78,17 @@
  *   +0x114  ULevel*
  *           Confirmed: Tick @0x8143b5a
  */
-#define UGAMEENGINE_PENDING_LEVEL_OFFSET 0x034
-#define UGAMEENGINE_LEVEL_OFFSET         0x114
+#define UGAMEENGINE_OFFSET_PendingLevel 0x034
+#define UGAMEENGINE_OFFSET_Level        0x114
+
+/*
+ * ULevel
+ *   +0x30  Actors  TArray<AActor*>  Data pointer to actor list
+ *   +0x34  Actors  int              Num field (actor count)
+ *   Confirmed: ULevel::GetLevelInfo @0x80de623
+ */
+#define ULEVEL_OFFSET_Actors     0x30
+#define ULEVEL_OFFSET_Actors_Num 0x34
 
 /*
  * FURL
@@ -107,7 +116,7 @@
  *   +0x5f4  AGameInfo* (KFGameType)
  *           Confirmed: SpawnPlayActor at @0x8153165
  */
-#define ALEVELINFO_GAMEINFO_OFFSET 0x5f4
+#define ALEVELINFO_OFFSET_GameInfo 0x5f4
 
 /*
  * AGameReplicationInfo (GRI)
@@ -164,9 +173,9 @@
  *   +0x490  APlayerReplicationInfo*
  *   +0x514  UNetConnection*
  */
-#define APLAYERCONTROLLER_OFFSET_PAWN    0x360
+#define APLAYERCONTROLLER_OFFSET_Pawn    0x360
 #define APLAYERCONTROLLER_OFFSET_PRI     0x490
-#define APLAYERCONTROLLER_OFFSET_NETCONN 0x514
+#define APLAYERCONTROLLER_OFFSET_NetConn 0x514
 
 /*
  * KFPawn (Pawn actor, accessed via PC+0x360)
@@ -364,8 +373,10 @@ int is_server_busy(void);
 int is_game_started(void);
 int is_player_controller(const ucs2_t *name);
 int is_zed_actor(const ucs2_t *name);
+
 int get_level_objects(void **out_level_info, void **out_game_info);
 void *get_gconfig(void);
+
 void *find_gri(void);
 void *find_access_control(void);
 

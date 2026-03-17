@@ -92,7 +92,7 @@ static void update_game_state(void) {
     return;
 
   // Level change detection
-  void *cur_level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  void *cur_level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
   if (cur_level && last_level_ptr && cur_level != last_level_ptr) {
     hook_log_debug("level change detected (%p -> %p)\n", last_level_ptr,
                    cur_level);
@@ -153,7 +153,7 @@ int is_server_busy(void) {
     return 1;
 
   void *pending =
-      *(void **)((uint8_t *)engine + UGAMEENGINE_PENDING_LEVEL_OFFSET);
+      *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_PendingLevel);
   return pending != NULL;
 }
 
@@ -198,7 +198,7 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
   if (!engine)
     return 0;
 
-  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
   if (!level)
     return 0;
 
@@ -207,7 +207,7 @@ int get_level_objects(void **out_level_info, void **out_game_info) {
     return 0;
 
   void *game_info =
-      *(void **)((uint8_t *)level_info + ALEVELINFO_GAMEINFO_OFFSET);
+      *(void **)((uint8_t *)level_info + ALEVELINFO_OFFSET_GameInfo);
   if (!game_info)
     return 0;
 
@@ -233,7 +233,7 @@ void *find_gri(void) {
   if (!engine)
     return NULL;
 
-  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
   if (!level)
     return NULL;
 
@@ -264,7 +264,7 @@ void *find_access_control(void) {
   if (!engine)
     return NULL;
 
-  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_LEVEL_OFFSET);
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
   if (!level)
     return NULL;
 
