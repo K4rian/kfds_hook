@@ -8,6 +8,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "hook_cmd.h"
 #include "hook_cmd_debug.h"
 #include "hook_config.h"
 #include "hook_engine.h"
@@ -112,13 +113,33 @@ static FILE *dump_open(const char *cmd_name, const char *override_path,
   return f;
 }
 
+/*
+ * Retrieves the actor list and count from the current level.
+ * Returns 1 and populates out_actors/out_count on success, 0 if not ready.
+ */
+static int get_actor_list(void ***out_actors, int *out_count) {
+  void *engine = hook_engine_get();
+  if (!engine)
+    return 0;
+
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
+  if (!level)
+    return 0;
+
+  *out_actors = *(void ***)((uint8_t *)level + ULEVEL_OFFSET_Actors);
+  *out_count = *(int *)((uint8_t *)level + ULEVEL_OFFSET_Actors_Num);
+  return 1;
+}
+
 // ============================================================================
 // DEBUG COMMANDS
 // ============================================================================
 /*
  * Dumps the GameReplicationInfo (GRI) memory layout.
  */
-void cmd_debug_gri_dump(void) {
+void cmd_debug_gri_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("GRIDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -142,20 +163,23 @@ void cmd_debug_gri_dump(void) {
   hexdump_to(f, label, (uint8_t *)gri + 0x580, 0x280);
 
   fclose(f);
-  hook_log_debug("GRIDump saved to %s\n", path);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugGRIDump: dump saved to %s\n", path);
   hook_socket_finish_json(&jb);
 }
 
 /*
  * Dumps the PlayerReplicationInfo (PRI) memory layout.
  */
-void cmd_debug_pri_dump(void) {
+void cmd_debug_pri_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("PRIDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -205,13 +229,14 @@ void cmd_debug_pri_dump(void) {
   }
 
   fclose(f);
-  hook_log_debug("PRIDump saved to %s\n", path);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugPRIDump: dump saved to %s\n", path);
   hook_socket_finish_json(&jb);
 }
 
@@ -219,7 +244,9 @@ void cmd_debug_pri_dump(void) {
  * Dumps every non-null actor in the level actor list.
  * Output per actor: index, pointer, and full UObject name.
  */
-void cmd_debug_actors_dump(void) {
+void cmd_debug_actors_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("ActorsDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -232,14 +259,12 @@ void cmd_debug_actors_dump(void) {
     return;
   }
 
-  void *ge = hook_engine_get();
-  if (!ge) {
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count)) {
     fclose(f);
-    hook_socket_finish_err("GGameEngine is NULL");
+    return;
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
 
   fprintf(f, "Actor list | %d slots\n\n", actor_count);
   fprintf(f, "%-6s  %-12s  %s\n", "index", "pointer", "name");
@@ -262,13 +287,15 @@ void cmd_debug_actors_dump(void) {
   fprintf(f, "\n%d actors total, %d non-null.\n", actor_count, non_null);
 
   fclose(f);
-  hook_log_debug("ActorsDump saved to %s (%d actors)\n", path, non_null);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugActorsDump: dump saved to %s (%d actors)\n", path,
+                 non_null);
   hook_socket_finish_json(&jb);
 }
 
@@ -276,7 +303,9 @@ void cmd_debug_actors_dump(void) {
  * Dumps every connected PlayerController, PC+0x000..+0x5ff.
  * Used to locate the Pawn* pointer on the PC object.
  */
-void cmd_debug_pc_dump(void) {
+void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("PCDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -289,14 +318,12 @@ void cmd_debug_pc_dump(void) {
     return;
   }
 
-  void *ge = hook_engine_get();
-  if (!ge) {
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count)) {
     fclose(f);
-    hook_socket_finish_err("GGameEngine is NULL");
+    return;
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
 
   int dumped = 0;
   for (int i = 0; i < actor_count; i++) {
@@ -333,13 +360,14 @@ void cmd_debug_pc_dump(void) {
     fprintf(f, "No connected human PlayerControllers found.\n");
 
   fclose(f);
-  hook_log_debug("PCDump saved to %s (%d PCs)\n", path, dumped);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugPCDump: dump saved to %s (%d PCs)\n", path, dumped);
   hook_socket_finish_json(&jb);
 }
 
@@ -348,7 +376,9 @@ void cmd_debug_pc_dump(void) {
  * Follows PC+0x360 (APLAYERCONTROLLER_OFFSET_PAWN) to reach the Pawn actor.
  * Skips players with NULL Pawn (dead/spectating).
  */
-void cmd_debug_pcpawn_dump(void) {
+void cmd_debug_pcpawn_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("PCPawnDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -361,14 +391,12 @@ void cmd_debug_pcpawn_dump(void) {
     return;
   }
 
-  void *ge = hook_engine_get();
-  if (!ge) {
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count)) {
     fclose(f);
-    hook_socket_finish_err("GGameEngine is NULL");
+    return;
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
 
   int dumped = 0;
   for (int i = 0; i < actor_count; i++) {
@@ -413,20 +441,24 @@ void cmd_debug_pcpawn_dump(void) {
     fprintf(f, "No connected human PlayerControllers found.\n");
 
   fclose(f);
-  hook_log_debug("PCPawnDump saved to %s (%d entries)\n", path, dumped);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugPCPawnDump: dump saved to %s (%d entries)\n", path,
+                 dumped);
   hook_socket_finish_json(&jb);
 }
 
 /*
  * Dumps every PlayerController network connection (excluding WebAdmin).
  */
-void cmd_debug_pcnetconn_dump(void) {
+void cmd_debug_pcnetconn_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("PCNetConnDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -439,14 +471,12 @@ void cmd_debug_pcnetconn_dump(void) {
     return;
   }
 
-  void *ge = hook_engine_get();
-  if (!ge) {
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count)) {
     fclose(f);
-    hook_socket_finish_err("GGameEngine is NULL");
+    return;
   }
-  void *level = *(void **)((uint8_t *)ge + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
 
   for (int i = 0; i < actor_count; i++) {
     void *actor = actors[i];
@@ -464,13 +494,14 @@ void cmd_debug_pcnetconn_dump(void) {
   }
 
   fclose(f);
-  hook_log_debug("PCNetConnDump saved to %s\n", path);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugPCNetConnDump: debug saved to %s\n", path);
   hook_socket_finish_json(&jb);
 }
 
@@ -478,7 +509,9 @@ void cmd_debug_pcnetconn_dump(void) {
  * Dumps all GNames entries to a file.
  * Output format: index, name string per line.
  */
-void cmd_debug_gnames_dump(void) {
+void cmd_debug_gnames_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   char path[512];
   FILE *f = dump_open("GNamesDump",
                       g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
@@ -505,13 +538,14 @@ void cmd_debug_gnames_dump(void) {
   }
 
   fclose(f);
-  hook_log_debug("GNamesDump saved to %s\n", path);
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, path);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugGNamesDump: dump saved to %s\n", path);
   hook_socket_finish_json(&jb);
 }
 
@@ -522,7 +556,9 @@ void cmd_debug_gnames_dump(void) {
  * WARNING: destructive; removes the entire section with
  * all K/V pairs, including the header.
  */
-void cmd_debug_cfg_empty_section(void) {
+void cmd_debug_cfg_empty_section(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Section [, File]");
     return;
@@ -544,76 +580,61 @@ void cmd_debug_cfg_empty_section(void) {
     fp = file;
   }
 
-  hook_log_debug("CfgEmptySection: calling EmptySection on [%s]\n",
+  hook_log_debug("DebugCfgEmptySection: calling on [%s]\n",
                  g_socket_slot.req.args[0]);
 
   GConfig_EmptySection(gcfg, sec, fp);
   GConfig_Flush(gcfg, 1, fp);
-
-  hook_log_debug("CfgEmptySection: done, flushed\n");
 
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, g_socket_slot.req.args[0]);
   jb_raw(&jb, "}");
+
+  hook_log_debug("DebugCfgEmptySection: done, flushed\n");
   hook_socket_finish_json(&jb);
 }
 
 // ============================================================================
 // DEBUG COMMAND DISPATCHER
 // ============================================================================
-void hook_debug_command_dispatch(char* cmd) {
-  hook_log_debug("Executing debug cmd: %s\n", cmd);
+static const cmd_entry_t debug_cmd_table[] = {
+    {"debuggridump", cmd_debug_gri_dump, 1},
+    {"debugpridump", cmd_debug_pri_dump, 1},
+    {"debugactorsdump", cmd_debug_actors_dump, 1},
+    {"debugpcdump", cmd_debug_pc_dump, 1},
+    {"debugpcpawndump", cmd_debug_pcpawn_dump, 1},
+    {"debugpcnetconndump", cmd_debug_pcnetconn_dump, 1},
+    {"debuggnamesdump", cmd_debug_gnames_dump, 0},
+    {"debugcfgemptysection", cmd_debug_cfg_empty_section, 0},
+};
+#define DEBUG_CMD_TABLE_SIZE                                                   \
+  ((int)(sizeof(debug_cmd_table) / sizeof(debug_cmd_table[0])))
 
-  // GameReplicationInfo (GRI) hex dump to file
-  if (strcmp(cmd, "debuggridump") == 0) {
-    cmd_debug_gri_dump();
-    return;
+void hook_debug_command_dispatch(char *cmd) {
+  hook_log_debug("debug cmd: %s\n", cmd);
+
+  // Most commands require level objects
+  void *level_info = NULL, *game_info = NULL;
+
+  // Build ctx and dispatch via table
+  for (int i = 0; i < DEBUG_CMD_TABLE_SIZE; i++) {
+    if (strcmp(cmd, debug_cmd_table[i].name) == 0) {
+      if (debug_cmd_table[i].needs_level) {
+        if (!get_level_objects(&level_info, &game_info)) {
+          hook_socket_finish_err("level not ready");
+          return;
+        }
+      }
+      cmd_ctx_t ctx = {level_info, game_info};
+      debug_cmd_table[i].fn(&ctx);
+      return;
+    }
   }
 
-  // PlayerReplicationInfo (PRI) hex dump to file
-  if (strcmp(cmd, "debugpridump") == 0) {
-    cmd_debug_pri_dump();
-    return;
-  }
-
-  // Actor list hex dump to file
-  if (strcmp(cmd, "debugactorsdump") == 0) {
-    cmd_debug_actors_dump();
-    return;
-  }
-
-  // PlayerController (PC) list hex dump to file
-  if (strcmp(cmd, "debugpcdump") == 0) {
-    cmd_debug_pc_dump();
-    return;
-  }
-
-  // PlayerController (PC) Pawn hex dump to file
-  if (strcmp(cmd, "debugpcpawndump") == 0) {
-    cmd_debug_pcpawn_dump();
-    return;
-  }
-
-  // PlayerController (PC) Network Connection hex dump to file
-  if (strcmp(cmd, "debugpcnetconndump") == 0) {
-    cmd_debug_pcnetconn_dump();
-    return;
-  }
-
-  // Global Name Table (GNames) list dump to file
-  if (strcmp(cmd, "debuggnamesdump") == 0) {
-    cmd_debug_gnames_dump();
-    return;
-  }
-
-  // Nuke an entire ini section from a configuration file,
-  // header included
-  if (strcmp(cmd, "debugcfgemptysection") == 0) {
-    cmd_debug_cfg_empty_section();
-    return;
-  }
+  hook_log_debug("Unknown debug command: %s\n", g_socket_slot.req.cmd);
+  hook_socket_finish_err("unknown debug command");
 }
 
 #endif /* DEBUG */

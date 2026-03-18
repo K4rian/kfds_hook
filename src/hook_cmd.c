@@ -16,10 +16,6 @@
 #include "hook_cmd_debug.h"
 #endif
 
-//
-// TODO: Cleanup
-//
-
 // ============================================================================
 // COMMAND DEFINES
 // ============================================================================
@@ -74,13 +70,31 @@ static void furl_get_utf8(void *level, int offset, char *dst, size_t dst_len) {
 }
 
 /*
- * Writes a string value to a GRI FString field at the given offset.
- * If the new value fits within the existing FString buffer (new_num <= Max),
- * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
- * and swapped in. The old buffer is intentionally leaked since there's no
- * safe way to free Unreal's heap allocations from outside the engine.
+ * Writes new_val into fstr in-place if it fits (new_num <= Max), otherwise
+ * allocates a new buffer via FString_ctor and swaps it in.
+ * The old buffer is intentionally leaked, no safe way to free Unreal heap.
  */
-static int gri_set_str(int offset, const char *value) {
+static void fstring_write(FString *fstr, const ucs2_t *new_val, int new_num,
+                          const char *label) {
+  if (fstr->Max > 0 && new_num <= fstr->Max) {
+    memcpy(fstr->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
+    fstr->Num = new_num;
+    hook_log_debug("%s: wrote in-place\n", label);
+  } else {
+    FString tmp = {0};
+    FString_ctor(&tmp, new_val);
+    fstr->Data = tmp.Data;
+    fstr->Num = tmp.Num;
+    fstr->Max = tmp.Max;
+    hook_log_debug("%s: allocated new buffer (old buffer leaked)\n", label);
+  }
+}
+
+/*
+ * Writes a string value to a GRI FString field at the given offset.
+ * Returns 1 on success, 0 if GRI is not found (response already set).
+ */
+static int gri_set_str(int offset, const char *value, const char *label) {
   void *gri = find_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
@@ -90,28 +104,13 @@ static int gri_set_str(int offset, const char *value) {
   ucs2_t new_val[ARG_MAX_CHARS] = {0};
   utf8_to_ucs2(value, new_val, ARG_MAX_CHARS);
 
-  int new_len = 0;
-  while (new_val[new_len])
-    new_len++;
-  int new_num = new_len + 1;
+  int new_num = ucs2_len(new_val) + 1;
 
   FString *fstr = (FString *)((uint8_t *)gri + offset);
-  hook_log_debug("gri_set_str: field=+0x%x Data=%p Num=%d Max=%d new_num=%d\n",
+  hook_log_debug("%s: field=+0x%x Data=%p Num=%d Max=%d new_num=%d\n", label,
                  offset, (void *)fstr->Data, fstr->Num, fstr->Max, new_num);
 
-  if (fstr->Max > 0 && new_num <= fstr->Max) {
-    memcpy(fstr->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
-    fstr->Num = new_num;
-    hook_log_debug("gri_set_str: wrote in-place\n");
-  } else {
-    FString tmp = {0};
-    FString_ctor(&tmp, new_val);
-    fstr->Data = tmp.Data;
-    fstr->Num = tmp.Num;
-    fstr->Max = tmp.Max;
-
-    hook_log_debug("gri_set_str: allocated new buffer (old buffer leaked)\n");
-  }
+  fstring_write(fstr, new_val, new_num, label);
   return 1;
 }
 
@@ -119,7 +118,7 @@ static int gri_set_str(int offset, const char *value) {
  * Writes an integer value to a GRI int field at the given offset.
  * value is a decimal string converted afterward.
  */
-static int gri_set_int(int offset, const char *value) {
+static int gri_set_int(int offset, const char *value, const char *label) {
   void *gri = find_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
@@ -129,7 +128,7 @@ static int gri_set_int(int offset, const char *value) {
   int v = (int)strtol(value, NULL, 10);
   *(int *)((uint8_t *)gri + offset) = v;
 
-  hook_log_debug("gri_set_int: field=+0x%x value=%d\n", offset, v);
+  hook_log_debug("%s: field=+0x%x value=%d\n", label, offset, v);
   return 1;
 }
 
@@ -142,18 +141,18 @@ static int gri_set_int(int offset, const char *value) {
  * value:    UCS-2 value to match exactly (case-sensitive)
  *           NULL = key-only mode: delete all entries whose key matches
  * max_del:  0 = delete all matches, N = delete at most N occurrences
- * Returns:  number of entries deleted, 0 if no matches, -1 on internal error.
+ * Returns:  number of entries deleted or 0 if no matches.
  */
 static int cfg_delete_entries(void *gcfg, const ucs2_t *section,
                               const ucs2_t *key, const ucs2_t *value,
                               const ucs2_t *file, int max_del) {
   // Read all entries from the section
-  ucs2_t raw[CFG_DEL_SEC_BUF];
+  static ucs2_t raw[CFG_DEL_SEC_BUF];
   memset(raw, 0, sizeof(raw));
   GConfig_GetSection(gcfg, section, raw, CFG_DEL_SEC_BUF, file);
 
   // Parse and filter
-  ucs2_t survivors[CFG_DEL_MAX_ENTRIES][ARG_MAX_CHARS * 2];
+  static ucs2_t survivors[CFG_DEL_MAX_ENTRIES][ARG_MAX_CHARS * 2];
   int survivor_cnt = 0;
   int deleted_cnt = 0;
 
@@ -219,7 +218,7 @@ static int cfg_delete_entries(void *gcfg, const ucs2_t *section,
     GConfig_SetString(gcfg, section, skey, sval, file, 0);
   }
 
-  // Flush wit bRead=1: write to disk, preserve cache
+  // Flush with bRead=1: write to disk, preserve cache
   GConfig_Flush(gcfg, 1, file);
 
   return deleted_cnt;
@@ -246,32 +245,125 @@ static void tarray_fstring_remove(TArrayFString *arr, int i) {
  * Copies everything before the first space into dst, or the full string
  * if no space is found. Always NUL-terminates. dst_size must be > 0.
  */
-static void extract_steamid_prefix(const char *src, char *dst, size_t dst_size) {
-    const char *sp = strchr(src, ' ');
-    size_t len = sp ? (size_t)(sp - src) : strlen(src);
-    if (len >= dst_size)
-        len = dst_size - 1;
-    memcpy(dst, src, len);
-    dst[len] = '\0';
+static void extract_steamid_prefix(const char *src, char *dst,
+                                   size_t dst_size) {
+  const char *sp = strchr(src, ' ');
+  size_t len = sp ? (size_t)(sp - src) : strlen(src);
+  if (len >= dst_size)
+    len = dst_size - 1;
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+}
+
+/*
+ * Retrieves the actor list and count from the current level.
+ * Returns 1 and populates out_actors/out_count on success, 0 if not ready.
+ */
+static int get_actor_list(void ***out_actors, int *out_count) {
+  void *engine = hook_engine_get();
+  if (!engine)
+    return 0;
+
+  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
+  if (!level)
+    return 0;
+
+  *out_actors = *(void ***)((uint8_t *)level + ULEVEL_OFFSET_Actors);
+  *out_count = *(int *)((uint8_t *)level + ULEVEL_OFFSET_Actors_Num);
+  return 1;
+}
+
+/*
+ * Broadcasts a message to all players via AGameInfo::eventBroadcast.
+ * fname_index controls chat channel styling.
+ */
+static void broadcast_msg(cmd_ctx_t *ctx, int fname_index) {
+  ucs2_t buf[ARG_MAX_CHARS];
+  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
+  FString fmsg;
+  FName ftype = {fname_index};
+  FString_ctor(&fmsg, buf);
+  AGameInfo_eventBroadcast(ctx->game_info, NULL, &fmsg, ftype);
+  FString_dtor(&fmsg);
+}
+
+/*
+ * Reads an FString from AccessControl at offset and returns it as JSON string.
+ * Returns empty string if the field is unset.
+ */
+static void ac_fstring_read(int offset, const char *label) {
+  void *ac = find_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  FString *fs = (FString *)((uint8_t *)ac + offset);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  if (fs->Data && fs->Num > 0)
+    jb_ucs2(&jb, fs->Data);
+  else
+    jb_raw(&jb, "\"\"");
+  jb_raw(&jb, "}");
+
+  hook_log_debug("%s: retrieved\n", label);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Parses Section, Key, and optional File from args[0..file_idx] into
+ * pre-zeroed UCS-2 buffers. Sets *fp to file if provided.
+ * Used by cfg commands that take Section, Key, [, File].
+ */
+static void cfg_parse_skf(ucs2_t *sec, ucs2_t *key, ucs2_t *file, ucs2_t **fp,
+                          int file_idx) {
+  arg_to_ucs2(0, sec, 256);
+  arg_to_ucs2(1, key, 256);
+  if (g_socket_slot.req.argc > file_idx &&
+      g_socket_slot.req.args[file_idx][0]) {
+    arg_to_ucs2(file_idx, file, 256);
+    *fp = file;
+  }
+}
+
+/*
+ * Parses Section and optional File from args[0..file_idx] into
+ * pre-zeroed UCS-2 buffers. Sets *fp to file if provided.
+ * Used by cfg commands that take Section [, File].
+ */
+static void cfg_parse_sf(ucs2_t *sec, ucs2_t *file, ucs2_t **fp, int file_idx) {
+  arg_to_ucs2(0, sec, 256);
+  if (g_socket_slot.req.argc > file_idx &&
+      g_socket_slot.req.args[file_idx][0]) {
+    arg_to_ucs2(file_idx, file, 256);
+    *fp = file;
+  }
 }
 
 // ============================================================================
 // PING
 // ============================================================================
-static void cmd_ping(void) {
+static void cmd_ping(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":");
   jb_str(&jb, HOOK_REVISION);
   jb_raw(&jb, "}");
 
+  hook_log_debug("Ping: Pong\n");
   hook_socket_finish_json(&jb);
 }
 
 // ============================================================================
 // CONSOLE
 // ============================================================================
-static void cmd_exec(void) {
+static void cmd_exec(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   // At least one command must be given
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Command");
@@ -289,73 +381,11 @@ static void cmd_exec(void) {
 }
 
 // ============================================================================
-// MAP CHANGE (TRAVEL)
-// ============================================================================
-static void cmd_server_travel(void *level_info) {
-  // Can't change on an empty map URL
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: MapURL");
-    return;
-  }
-
-  ucs2_t buf[ARG_MAX_CHARS];
-  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
-
-  FString url;
-  FString_ctor(&url, buf);
-  ALevelInfo_eventServerTravel(level_info, &url, 0);
-  FString_dtor(&url);
-
-  hook_log_debug("ServerTravel: '%s'\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-// ============================================================================
-// ADMIN SERVER MESSAGE
-// ============================================================================
-static void cmd_say(void *game_info) {
-  // Can't say anything if there's nothing to say
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: Message");
-    return;
-  }
-
-  ucs2_t buf[ARG_MAX_CHARS];
-  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
-
-  FString fmsg;
-  FName ftype = {FNAME_ServerSay};
-  FString_ctor(&fmsg, buf);
-  AGameInfo_eventBroadcast(game_info, NULL, &fmsg, ftype);
-  FString_dtor(&fmsg);
-
-  hook_log_debug("Say: '%s'\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-static void cmd_announce(void *game_info) {
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: Message");
-    return;
-  }
-
-  ucs2_t buf[ARG_MAX_CHARS];
-  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
-
-  FString fmsg;
-  FName ftype = {FNAME_CriticalEvent};
-  FString_ctor(&fmsg, buf);
-  AGameInfo_eventBroadcast(game_info, NULL, &fmsg, ftype);
-  FString_dtor(&fmsg);
-
-  hook_log_debug("Announce: '%s'\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-// ============================================================================
 // SERVER INFO
 // ============================================================================
-static void cmd_get_server_info(void) {
+static void cmd_get_server_info(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   void *gri = find_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
@@ -378,7 +408,7 @@ static void cmd_get_server_info(void) {
       {"admin_email", GRI_OFFSET_AdminEmail},
       {"motd", GRI_OFFSET_MessageOfTheDay},
   };
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < (int)(sizeof(str_fields) / sizeof(str_fields[0])); i++) {
     if (i > 0)
       jb_raw(&jb, ",");
 
@@ -408,7 +438,8 @@ static void cmd_get_server_info(void) {
 
   // Float fields
   jb_raw(&jb, ",\"game_diff\":");
-  float gd = *(float *)((uint8_t *)gri + GRI_OFFSET_GameDiff);
+  float gd;
+  memcpy(&gd, gri + GRI_OFFSET_GameDiff, sizeof(gd));
   char fbuf[32];
   snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
   jb_raw(&jb, fbuf);
@@ -420,11 +451,13 @@ static void cmd_get_server_info(void) {
 
   jb_raw(&jb, "}}");
 
-  // TODO: lOG
+  hook_log_debug("ServerInfo: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
-static void cmd_get_level_url(void) {
+static void cmd_get_level_url(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   void *level =
       *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
   if (!level) {
@@ -460,13 +493,13 @@ static void cmd_get_level_url(void) {
   jb_bool(&jb, *(int *)((uint8_t *)level + FURL_OFFSET_Valid));
 
   // Options
-  FString *op_array = (FString *)((uint8_t *)level + FURL_OFFSET_Op);
+  TArrayFString *op_array =
+      (TArrayFString *)((uint8_t *)level + FURL_OFFSET_Op);
   int op_num = op_array->Num;
-  FString *op_data = (FString *)op_array->Data;
+  FString *op_data = op_array->Data;
 
   jb_raw(&jb, ",\"options\":[");
   if (op_data && op_num > 0) {
-    char tmp[ARG_MAX_CHARS];
     int first = 1;
     for (int i = 0; i < op_num; i++) {
       FString *entry = &op_data[i];
@@ -484,8 +517,136 @@ static void cmd_get_level_url(void) {
 
   jb_raw(&jb, "}}");
 
-  // TODO: LOG
+  hook_log_debug("LevelURL: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
+// WAVE STATE
+// ============================================================================
+static void cmd_get_wave_state(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  void *gri = find_gri();
+  if (!gri) {
+    hook_socket_finish_err("GRI not found");
+    return;
+  }
+
+  uint8_t *base = (uint8_t *)gri;
+
+  // WaveNumber: 0-indexed in engine (wave 1 = 0, wave 4 = 3)
+  // bWaveInProgress at +0x5fc: 1=wave active, 0=trader/lobby
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{");
+  jb_raw(&jb, "\"wave_in_progress\":");
+  jb_bool(&jb, *(uint8_t *)(base + GRI_OFFSET_bWaveInProgress));
+  jb_raw(&jb, ",\"wave_number\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_WaveNumber));
+  jb_raw(&jb, ",\"final_wave\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_FinalWave));
+  jb_raw(&jb, ",\"num_monsters\":");
+  jb_int(&jb, *(int *)(base + GRI_OFFSET_numMonsters));
+  jb_raw(&jb, ",\"time_to_next_wave\":");
+  jb_int(&jb, *(int *)(base + GRI_OFFSET_TimeToNextWave));
+  jb_raw(&jb, ",\"base_difficulty\":");
+  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_BaseDifficulty));
+  jb_raw(&jb, ",\"game_diff\":");
+
+  float gd;
+  memcpy(&gd, base + GRI_OFFSET_GameDiff, sizeof(gd));
+  char fbuf[32];
+  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
+  jb_raw(&jb, fbuf);
+
+  jb_raw(&jb, ",\"game_started\":");
+  jb_bool(&jb, is_game_started());
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("WaveState: %s\n", jb.buf);
+  hook_socket_finish_json(&jb);
+}
+
+// ============================================================================
+// MAP CHANGE (TRAVEL)
+// ============================================================================
+static void cmd_server_travel(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: MapURL");
+    return;
+  }
+
+  ucs2_t buf[ARG_MAX_CHARS];
+  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
+
+  FString url;
+  FString_ctor(&url, buf);
+  ALevelInfo_eventServerTravel(ctx->level_info, &url, 0);
+  FString_dtor(&url);
+
+  hook_log_debug("ServerTravel: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
+// ADMIN SERVER MESSAGE
+// ============================================================================
+static void cmd_say(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Message");
+    return;
+  }
+  broadcast_msg(ctx, FNAME_ServerSay);
+
+  hook_log_debug("Say: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+static void cmd_announce(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Message");
+    return;
+  }
+  broadcast_msg(ctx, FNAME_CriticalEvent);
+
+  hook_log_debug("Announce: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
+// SKIP TRADER
+// ============================================================================
+/*
+ * Forces trader countdown to 6 seconds.
+ * Targets KFGameType.WaveCountDown, NOT GRI.TimeToNextWave.
+ * GRI.TimeToNextWave is a replicated mirror and overwritten from WaveCountDown
+ * every tick, so writing it directly has no lasting effect.
+ * Value below 5 breaks the internal script logic and lead to unexpected
+ * behavior.
+ */
+static void cmd_skip_trader(cmd_ctx_t *ctx) {
+  int wip =
+      *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_bWaveInProgress);
+  int doorsopen =
+      *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_bTradingDoorsOpen);
+  if (wip || !doorsopen) {
+    hook_socket_finish_err("not in trader time");
+    return;
+  }
+
+  // Already at or below minimum
+  int countdown =
+      *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_WaveCountDown);
+  if (countdown <= 6) {
+    hook_socket_finish_ok();
+    return;
+  }
+
+  *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_WaveCountDown) = 6;
+
+  hook_log_debug("SkipTrader: %ds -> 6s\n", countdown);
+  hook_socket_finish_ok();
 }
 
 // ============================================================================
@@ -506,11 +667,13 @@ static void cmd_get_level_url(void) {
  *       "KFVet" prefix stripped, null if pointer is NULL.
  * Perk Level: int at PRI+0x5f8, 1-indexed (1-6).
  */
-static void cmd_get_players(void) {
-  void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
+static void cmd_get_players(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count))
+    return;
 
   json_buf_t jb;
   jb_init(&jb);
@@ -549,7 +712,8 @@ static void cmd_get_players(void) {
 
     uint8_t ping_raw = *(uint8_t *)((uint8_t *)pri + PRI_OFFSET_Ping);
     int ping_ms = (int)ping_raw * 4;
-    float dosh = *(float *)((uint8_t *)pri + PRI_OFFSET_Dosh);
+    float dosh;
+    memcpy(&dosh, (uint8_t *)pri + PRI_OFFSET_Dosh, sizeof(dosh));
     int kills = *(int *)((uint8_t *)pri + PRI_OFFSET_Kills);
     int deaths = *(int *)((uint8_t *)pri + PRI_OFFSET_Deaths);
     // TODO: assists
@@ -560,7 +724,9 @@ static void cmd_get_players(void) {
     int armor = -1;
     if (pawn) {
       health = *(int *)((uint8_t *)pawn + APAWN_OFFSET_Health);
-      armor = (int)*(float *)((uint8_t *)pawn + APAWN_OFFSET_ShieldStrength);
+      float shield;
+      memcpy(&shield, (uint8_t *)pawn + APAWN_OFFSET_ShieldStrength, sizeof(shield));
+      armor = (int)shield;
     }
 
     // Perk name and level from PRI
@@ -631,6 +797,7 @@ static void cmd_get_players(void) {
 
   jb_raw(&jb, "]}");
 
+  hook_log_debug("Players: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -639,7 +806,7 @@ static void cmd_get_players(void) {
  * Uses Cast_APlayerController to confirm each actor is a PC.
  * Skips UTServerAdminSpectator (WebAdmin).
  */
-static void cmd_kick(void *game_info) {
+static void cmd_kick(cmd_ctx_t *ctx) {
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: SteamID64");
     return;
@@ -647,16 +814,18 @@ static void cmd_kick(void *game_info) {
 
   uint64_t target = (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
   if (target == 0) {
-    hook_socket_finish_err("invalid SteamID");
+    hook_socket_finish_err("invalid SteamID64");
     return;
   }
 
-  void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count))
+    return;
 
   int kicked = 0;
+  uint64_t steamid = 0;
+  char player_name[ARG_MAX_CHARS] = {0};
   for (int i = 0; i < actor_count && !kicked; i++) {
     void *actor = actors[i];
     if (!actor)
@@ -679,20 +848,36 @@ static void cmd_kick(void *game_info) {
     if (!netconn)
       continue;
 
-    uint64_t steamid =
-        *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
+    steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
     if (steamid == 0)
       steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+    if (steamid != target)
+      continue;
 
-    hook_log_debug("kick: pc=%p steamid=%" PRIu64 " target=%" PRIu64 "\n", pc,
+    hook_log_debug("Kick: matched pc=%p steamid=%" PRIu64 " target=%" PRIu64 "\n", pc,
                    steamid, target);
 
-    if (steamid == target) {
-      AGameInfo_eventKickIdler(game_info, pc);
-      kicked = 1;
+    // Get the player's name
+    void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
+    if (pri) {
+      FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
+      if (name_fs->Data && name_fs->Num > 0)
+        ucs2_to_utf8(name_fs->Data, player_name, sizeof(player_name));
     }
+    AGameInfo_eventKickIdler(ctx->game_info, pc);
+    kicked = 1;
   }
-  kicked ? hook_socket_finish_ok() : hook_socket_finish_err("player not found");
+
+  if (kicked) {
+    if (player_name[0] == '\0')
+      strcpy(player_name, "Player");
+    hook_log_debug("Kick: %s [%" PRIu64 "] kicked\n", player_name, steamid);
+    hook_socket_finish_ok();
+  } else {
+    hook_log_debug("Kick: player with SteamID64 %" PRIu64 " not found\n",
+                   steamid);
+    hook_socket_finish_err("player not found");
+  }
 }
 
 /*
@@ -700,7 +885,9 @@ static void cmd_kick(void *game_info) {
  * Message is visible only to the target.
  * Bypasses the broadcast chain entirely.
  */
-static void cmd_send_player_message(void) {
+static void cmd_send_player_message(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: SteamID64, Message");
     return;
@@ -712,10 +899,10 @@ static void cmd_send_player_message(void) {
     return;
   }
 
-  void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count))
+    return;
 
   // Build prefixed message
   static const char prefix[] = "[Server->You]: ";
@@ -737,6 +924,8 @@ static void cmd_send_player_message(void) {
   FName ftype = {FNAME_ServerSay};
 
   int found = 0;
+  uint64_t steamid = 0;
+  char player_name[ARG_MAX_CHARS] = {0};
   for (int i = 0; i < actor_count; i++) {
     void *actor = actors[i];
     if (!actor)
@@ -749,19 +938,37 @@ static void cmd_send_player_message(void) {
     if (!netconn)
       continue;
 
-    uint64_t sid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
-    if (sid == 0)
-      sid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
-    if (sid != target_id)
+    steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
+    if (steamid == 0)
+      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+    if (steamid != target_id)
       continue;
 
+    // Get the player's name
+    void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
+    if (pri) {
+      FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
+      if (name_fs->Data && name_fs->Num > 0)
+        ucs2_to_utf8(name_fs->Data, player_name, sizeof(player_name));
+    }
     APlayerController_eventClientMessage(actor, &msg_fstr, ftype);
     found = 1;
     break;
   }
   FString_dtor(&msg_fstr);
 
-  found ? hook_socket_finish_ok() : hook_socket_finish_err("player not found");
+  if (found) {
+    if (player_name[0] == '\0')
+      strcpy(player_name, "Player");
+    hook_log_debug("SendPlayerMessage: (%s[%" PRIu64 "]): %s\n", player_name,
+                   steamid, g_socket_slot.req.args[1]);
+    hook_socket_finish_ok();
+  } else {
+    hook_log_debug("SendPlayerMessage: player with SteamID64 %" PRIu64
+                   " not found\n",
+                   steamid);
+    hook_socket_finish_err("player not found");
+  }
 }
 
 // ============================================================================
@@ -775,11 +982,13 @@ static void cmd_send_player_message(void) {
  *   "class"  -> class name with "Zombie" prefix stripped (e.g. "Clot", "Boss")
  *   "health" -> current HP (int, always > 0)
  */
-static void cmd_get_zeds(void) {
-  void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
+static void cmd_get_zeds(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count))
+    return;
 
   json_buf_t jb;
   jb_init(&jb);
@@ -821,6 +1030,7 @@ static void cmd_get_zeds(void) {
   }
   jb_raw(&jb, "]}");
 
+  hook_log_debug("Zeds: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -830,11 +1040,13 @@ static void cmd_get_zeds(void) {
  * monster actor. The engine's death event fires naturally on the next tick
  * (the hook does not need to call it explicitly).
  */
-static void cmd_kill_zeds(void) {
-  void *level =
-      *(void **)((uint8_t *)hook_engine_get() + UGAMEENGINE_OFFSET_Level);
-  void **actors = *(void ***)((uint8_t *)level + 0x30);
-  int actor_count = *(int *)((uint8_t *)level + 0x34);
+static void cmd_kill_zeds(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!get_actor_list(&actors, &actor_count))
+    return;
 
   int killed = 0;
   for (int i = 0; i < actor_count; i++) {
@@ -861,14 +1073,13 @@ static void cmd_kill_zeds(void) {
     killed++;
   }
 
-  hook_log_debug("KillZeds: killed %d zed(s)\n", killed);
-
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":{\"killed\":");
   jb_int(&jb, killed);
   jb_raw(&jb, "}}");
 
+  hook_log_debug("KillZeds: killed %d zed(s)\n", killed);
   hook_socket_finish_json(&jb);
 }
 
@@ -879,48 +1090,18 @@ static void cmd_kill_zeds(void) {
  * Reads the live GamePassword from AccessControl.
  * Returns empty string if the password is not set.
  */
-static void cmd_get_game_password(void) {
-  void *ac = find_access_control();
-  if (!ac) {
-    hook_socket_finish_err("AccessControl not found");
-    return;
-  }
-
-  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_GamePassword);
-  json_buf_t jb;
-  jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":");
-  if (fs->Data && fs->Num > 0)
-    jb_ucs2(&jb, fs->Data);
-  else
-    jb_raw(&jb, "\"\"");
-  jb_raw(&jb, "}");
-
-  hook_socket_finish_json(&jb);
+static void cmd_get_game_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+  ac_fstring_read(ACCESSCONTROL_OFFSET_GamePassword, "GamePassword");
 }
 
 /*
  * Reads the live AdminPassword from AccessControl.
  * Returns empty string if the password is not set.
  */
-static void cmd_get_admin_password(void) {
-  void *ac = find_access_control();
-  if (!ac) {
-    hook_socket_finish_err("AccessControl not found");
-    return;
-  }
-
-  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_AdminPassword);
-  json_buf_t jb;
-  jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":");
-  if (fs->Data && fs->Num > 0)
-    jb_ucs2(&jb, fs->Data);
-  else
-    jb_raw(&jb, "\"\"");
-  jb_raw(&jb, "}");
-
-  hook_socket_finish_json(&jb);
+static void cmd_get_admin_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+  ac_fstring_read(ACCESSCONTROL_OFFSET_AdminPassword, "AdminPassword");
 }
 
 /*
@@ -928,7 +1109,9 @@ static void cmd_get_admin_password(void) {
  * Each entry is a policy string, e.g. "ACCEPT;*" or "DENY;1.2.3.4".
  * Reflects the current in-memory state.
  */
-static void cmd_get_ip_policies(void) {
+static void cmd_get_ip_policies(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   void *ac = find_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
@@ -963,6 +1146,7 @@ static void cmd_get_ip_policies(void) {
   }
   jb_raw(&jb, "]}");
 
+  hook_log_debug("IPPolicies: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -970,7 +1154,9 @@ static void cmd_get_ip_policies(void) {
  * Returns the live BannedIDs TArray as a structured JSON array.
  * Each entry is split on the first space: left=SteamID, right=PlayerName.
  */
-static void cmd_get_banned_ids(void) {
+static void cmd_get_banned_ids(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   void *ac = find_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
@@ -1023,6 +1209,7 @@ static void cmd_get_banned_ids(void) {
   }
   jb_raw(&jb, "]}");
 
+  hook_log_debug("BannedIDs: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -1034,7 +1221,9 @@ static void cmd_get_banned_ids(void) {
  * Does NOT kick currently connected players.
  * Persisted via CfgSetStr + CfgFlush.
  */
-static void cmd_add_ip_ban(void) {
+static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: IP");
     return;
@@ -1076,7 +1265,7 @@ static void cmd_add_ip_ban(void) {
   ucs2_t policy_ucs2[64] = {0};
   utf8_to_ucs2(policy_utf8, policy_ucs2, 64);
 
-  // Write new FString entry into the next TArray slot */
+  // Write new FString entry into the next TArray slot
   FString_ctor(&arr->Data[arr->Num], policy_ucs2);
   arr->Num++;
   hook_log_debug("AddIPBan: added \"%s\" at slot %d\n", policy_utf8,
@@ -1086,10 +1275,11 @@ static void cmd_add_ip_ban(void) {
   hook_policy_add_session_ip_ban(policy_utf8);
 
   // Persist to GConfig
-  ucs2_t val[64] = {0};
-  utf8_to_ucs2(policy_utf8, val, 64);
+  // ucs2_t val[64] = {0};
+  // utf8_to_ucs2(policy_utf8, val, 64);
   void *gcfg = get_gconfig();
-  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, val, BAN_FILE, 0);
+
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, policy_ucs2, BAN_FILE, 0);
   GConfig_Flush(gcfg, 1, BAN_FILE);
 
   hook_socket_finish_ok();
@@ -1102,7 +1292,9 @@ static void cmd_add_ip_ban(void) {
  * Does NOT unban currently connected players.
  * Returns error if no matching ban found in either live or GConfig.
  */
-static void cmd_remove_ip_ban(void) {
+static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: IP");
     return;
@@ -1187,7 +1379,9 @@ static void cmd_remove_ip_ban(void) {
  * Does NOT kick currently connected players.
  * Persisted via CfgSetStr + CfgFlush.
  */
-static void cmd_add_steam_ban(void) {
+static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: SteamID64 [, Name]");
     return;
@@ -1223,7 +1417,7 @@ static void cmd_add_steam_ban(void) {
     return;
   }
 
-  // Build "<steamid64> <n>" entry
+  // Build "<steamid64> <name>" entry
   const char *name =
       (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0])
           ? g_socket_slot.req.args[1]
@@ -1236,7 +1430,7 @@ static void cmd_add_steam_ban(void) {
   memcpy(id_buf, g_socket_slot.req.args[0], id_len < 31 ? id_len : 31);
   memcpy(name_buf, name, name_len < 63 ? name_len : 63);
 
-  // "<id> <n>\0"
+  // "<id> <name>\0"
   char entry_utf8[ARG_MAX_CHARS];
   const size_t id_part = strlen(id_buf);
   const size_t name_part = strlen(name_buf);
@@ -1257,10 +1451,11 @@ static void cmd_add_steam_ban(void) {
   hook_policy_add_session_steam_ban(entry_utf8);
 
   // Persist to GConfig
-  ucs2_t val[ARG_MAX_CHARS] = {0};
-  utf8_to_ucs2(entry_utf8, val, ARG_MAX_CHARS);
+  // ucs2_t val[ARG_MAX_CHARS] = {0};
+  // utf8_to_ucs2(entry_utf8, val, ARG_MAX_CHARS);
   void *gcfg = get_gconfig();
-  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, val, BAN_FILE, 0);
+
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, entry_ucs2, BAN_FILE, 0);
   GConfig_Flush(gcfg, 1, BAN_FILE);
 
   hook_socket_finish_ok();
@@ -1274,7 +1469,9 @@ static void cmd_add_steam_ban(void) {
  * Does NOT unban currently connected players.
  * Returns error if no matching ban found in either live or GConfig.
  */
-static void cmd_remove_steam_ban(void) {
+static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: SteamID64");
     return;
@@ -1399,13 +1596,18 @@ static void cmd_remove_steam_ban(void) {
  * Sets the server name shown in the server browser.
  * Change is lost on map change.
  */
-static void cmd_set_live_server_name(void) {
+static void cmd_set_live_server_name(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: ServerName");
     return;
   }
-  if (!gri_set_str(GRI_OFFSET_ServerName, g_socket_slot.req.args[0]))
+
+  if (!gri_set_str(GRI_OFFSET_ServerName, g_socket_slot.req.args[0],
+                   "SetLiveServerName"))
     return;
+
   hook_socket_finish_ok();
 }
 
@@ -1413,13 +1615,18 @@ static void cmd_set_live_server_name(void) {
  * Sets the server short name.
  * Change is lost on map change.
  */
-static void cmd_set_live_short_name(void) {
+static void cmd_set_live_short_name(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: ShortName");
     return;
   }
-  if (!gri_set_str(GRI_OFFSET_ShortName, g_socket_slot.req.args[0]))
+
+  if (!gri_set_str(GRI_OFFSET_ShortName, g_socket_slot.req.args[0],
+                   "SetLiveShortName"))
     return;
+
   hook_socket_finish_ok();
 }
 
@@ -1427,13 +1634,18 @@ static void cmd_set_live_short_name(void) {
  * Sets the admin name shown in the server browser.
  * Change is lost on map change.
  */
-static void cmd_set_live_admin_name(void) {
+static void cmd_set_live_admin_name(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: AdminName");
     return;
   }
-  if (!gri_set_str(GRI_OFFSET_AdminName, g_socket_slot.req.args[0]))
+
+  if (!gri_set_str(GRI_OFFSET_AdminName, g_socket_slot.req.args[0],
+                   "SetLiveAdminName"))
     return;
+
   hook_socket_finish_ok();
 }
 
@@ -1441,13 +1653,18 @@ static void cmd_set_live_admin_name(void) {
  * Sets the admin email shown in the server browser.
  * Change is lost on map change.
  */
-static void cmd_set_live_admin_email(void) {
+static void cmd_set_live_admin_email(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: AdminEmail");
     return;
   }
-  if (!gri_set_str(GRI_OFFSET_AdminEmail, g_socket_slot.req.args[0]))
+
+  if (!gri_set_str(GRI_OFFSET_AdminEmail, g_socket_slot.req.args[0],
+                   "SetLiveAdminMail"))
     return;
+
   hook_socket_finish_ok();
 }
 
@@ -1455,13 +1672,18 @@ static void cmd_set_live_admin_email(void) {
  * Sets the server region.
  * Change is lost on map change.
  */
-static void cmd_set_live_server_region(void) {
+static void cmd_set_live_server_region(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Region");
     return;
   }
-  if (!gri_set_int(GRI_OFFSET_ServerRegion, g_socket_slot.req.args[0]))
+
+  if (!gri_set_int(GRI_OFFSET_ServerRegion, g_socket_slot.req.args[0],
+                   "SetLiveServerRegion"))
     return;
+
   hook_socket_finish_ok();
 }
 
@@ -1469,43 +1691,42 @@ static void cmd_set_live_server_region(void) {
  * Sets the message of the day shown on the server.
  * Change is lost on map change.
  */
-static void cmd_set_live_motd(void) {
+static void cmd_set_live_motd(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: MessageOfTheDay");
     return;
   }
-  if (!gri_set_str(GRI_OFFSET_MessageOfTheDay, g_socket_slot.req.args[0]))
+
+  if (!gri_set_str(GRI_OFFSET_MessageOfTheDay, g_socket_slot.req.args[0],
+                   "SetLiveMOTD"))
     return;
+
   hook_socket_finish_ok();
 }
 
 /*
  * Sets the game difficulty and syncs both GRI fields:
  * BaseDifficulty (UI display) and GameDiff (tab overlay, cosmetic).
- * Effect is immediate and per-spawn: GameDifficulty is reads each time a new
+ * Effect is immediate and per-spawn: GameDifficulty is read each time a new
  * monster is spawned to calculate stats. Already-spawned zeds are not
  * retroactively affected. Already-connected players may not see the UI change
  * right away, they need to relog or wait for the next match.
  * This is a client-side replication issue, visual only.
  * Change is lost on map change.
  */
-static void cmd_set_live_game_difficulty(void *game_info) {
+static void cmd_set_live_game_difficulty(cmd_ctx_t *ctx) {
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Difficulty");
     return;
   }
 
-  float new_diff = strtof(g_socket_slot.req.args[0], NULL);
-  // if (new_diff != 1.0f && new_diff != 2.0f && new_diff != 4.0f &&
-  //     new_diff != 5.0f && new_diff != 7.0f) {
-  //   hook_socket_finish_err(
-  //       "invalid difficulty value");
-  //   return;
-  // }
-
-  // Read and write GameDifficulty via memcpy to avoid strict aliasing UB
-  uint8_t *ptr = (uint8_t *)game_info + GAMETYPE_OFFSET_GameDifficulty;
   float old_diff;
+  float new_diff = strtof(g_socket_slot.req.args[0], NULL);
+
+  // Read and write GameDifficulty via memcpy to avoid strict aliasing UB.
+  uint8_t *ptr = (uint8_t *)ctx->game_info + GAMETYPE_OFFSET_GameDifficulty;
   memcpy(&old_diff, ptr, sizeof(old_diff));
   memcpy(ptr, &new_diff, sizeof(new_diff));
 
@@ -1513,22 +1734,21 @@ static void cmd_set_live_game_difficulty(void *game_info) {
                  (double)new_diff);
 
   // Sync GRI fields so the UI stays consistent.
-  // find_gri() may return NULL during a level transition
+  // find_gri() may return NULL during a level transition.
   void *gri = find_gri();
   if (gri) {
     // BaseDifficulty drives the difficulty string and wave counter
-    // display in the lobby and scoreboard. Written as a single byte
+    // display in the lobby and scoreboard. Written as a single byte.
     uint8_t new_base_diff = (uint8_t)(int)new_diff;
     *((uint8_t *)gri + GRI_OFFSET_BaseDifficulty) = new_base_diff;
     hook_log_debug(
-        "SetLiveGameDifficulty: GRI+0x5c9 (BaseDifficulty) synced to %d\n",
-        (int)new_base_diff);
+        "SetLiveGameDifficulty: GRI+0x%x (BaseDifficulty) synced to %d\n",
+        GRI_OFFSET_BaseDifficulty, (int)new_base_diff);
 
-    // GameDiff (float), cosmetic copy, drives tab overlay difficulty name
+    // GameDiff (float), cosmetic copy, drives tab overlay difficulty name.
     memcpy((uint8_t *)gri + GRI_OFFSET_GameDiff, &new_diff, sizeof(new_diff));
-    hook_log_debug(
-        "SetLiveGameDifficulty: GRI+0x678 (GameDiff) synced to %.6g\n",
-        (double)new_diff);
+    hook_log_debug("SetLiveGameDifficulty: GRI+0x%x (GameDiff) synced to %.6g\n",
+                   GRI_OFFSET_GameDiff, (double)new_diff);
   } else {
     hook_log_debug("SetLiveGameDifficulty: GRI not found, "
                    "BaseDifficulty and GameDiff not updated\n");
@@ -1556,7 +1776,7 @@ static void cmd_set_live_game_difficulty(void *game_info) {
  * Already-connected players are not kicked.
  * Change is lost on map change.
  */
-static void cmd_set_live_max_players(void *game_info) {
+static void cmd_set_live_max_players(cmd_ctx_t *ctx) {
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: MaxPlayers");
     return;
@@ -1569,12 +1789,10 @@ static void cmd_set_live_max_players(void *game_info) {
     return;
   }
 
-  uint8_t *ptr = (uint8_t *)game_info + GAMETYPE_OFFSET_MaxPlayers;
+  uint8_t *ptr = (uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxPlayers;
   int old_max;
   memcpy(&old_max, ptr, sizeof(old_max));
   memcpy(ptr, &new_max, sizeof(new_max));
-
-  hook_log_debug("SetLiveMaxPlayers: %d -> %d\n", old_max, new_max);
 
   json_buf_t jb;
   jb_init(&jb);
@@ -1584,6 +1802,7 @@ static void cmd_set_live_max_players(void *game_info) {
   jb_int(&jb, new_max);
   jb_raw(&jb, "}}");
 
+  hook_log_debug("SetLiveMaxPlayers: %d -> %d\n", old_max, new_max);
   hook_socket_finish_json(&jb);
 }
 
@@ -1594,7 +1813,9 @@ static void cmd_set_live_max_players(void *game_info) {
  * and swapped in. The old buffer is intentionally leaked.
  * Effect is immediate, change is lost on map change.
  */
-static void cmd_set_live_game_password(void) {
+static void cmd_set_live_game_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Password");
     return;
@@ -1608,107 +1829,12 @@ static void cmd_set_live_game_password(void) {
 
   ucs2_t new_val[ARG_MAX_CHARS] = {0};
   arg_to_ucs2(0, new_val, ARG_MAX_CHARS);
-
-  int new_len = 0;
-  while (new_val[new_len])
-    new_len++;
-  int new_num = new_len + 1; // include NT
+  int new_num = ucs2_len(new_val) + 1; // include NT
 
   FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_GamePassword);
   hook_log_debug("SetLiveGamePassword: Data=%p Num=%d Max=%d new_num=%d\n",
                  (void *)fs->Data, fs->Num, fs->Max, new_num);
-
-  if (fs->Max > 0 && new_num <= fs->Max) {
-    memcpy(fs->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
-    fs->Num = new_num;
-    hook_log_debug("SetLiveGamePassword: wrote in-place\n");
-  } else {
-    FString tmp = {0};
-    FString_ctor(&tmp, new_val);
-    fs->Data = tmp.Data;
-    fs->Num = tmp.Num;
-    fs->Max = tmp.Max;
-    hook_log_debug("SetLiveGamePassword: allocated new buffer (old leaked)\n");
-  }
-
-  hook_socket_finish_ok();
-}
-
-// ============================================================================
-// WAVE STATE
-// ============================================================================
-static void cmd_get_wave_state(void) {
-  void *gri = find_gri();
-  if (!gri) {
-    hook_socket_finish_err("GRI not found");
-    return;
-  }
-
-  uint8_t *base = (uint8_t *)gri;
-
-  // WaveNumber: 0-indexed in engine (wave 1 = 0, wave 4 = 3)
-  // bWaveInProgress at +0x5fc: 1=wave active, 0=trader/lobby
-  // Both read as uint8_t and stored as single byte
-  json_buf_t jb;
-  jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":{");
-  jb_raw(&jb, "\"wave_in_progress\":");
-  jb_bool(&jb, *(uint8_t *)(base + GRI_OFFSET_bWaveInProgress));
-  jb_raw(&jb, ",\"wave_number\":");
-  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_WaveNumber));
-  jb_raw(&jb, ",\"final_wave\":");
-  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_FinalWave));
-  jb_raw(&jb, ",\"num_monsters\":");
-  jb_int(&jb, *(int *)(base + GRI_OFFSET_numMonsters));
-  jb_raw(&jb, ",\"time_to_next_wave\":");
-  jb_int(&jb, *(int *)(base + GRI_OFFSET_TimeToNextWave));
-  jb_raw(&jb, ",\"base_difficulty\":");
-  jb_int(&jb, *(uint8_t *)(base + GRI_OFFSET_BaseDifficulty));
-  jb_raw(&jb, ",\"game_diff\":");
-
-  float gd = *(float *)(base + GRI_OFFSET_GameDiff);
-  char fbuf[32];
-  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
-  jb_raw(&jb, fbuf);
-
-  jb_raw(&jb, ",\"game_started\":");
-  jb_bool(&jb, is_game_started());
-  jb_raw(&jb, "}}");
-
-  // TODO: lOG
-  hook_socket_finish_json(&jb);
-}
-
-// ============================================================================
-// SKIP TRADER
-// ============================================================================
-/*
- * Forces trader countdown to 6 seconds.
- * Targets KFGameType.WaveCountDown, NOT GRI.TimeToNextWave.
- * GRI.TimeToNextWave is a replicated mirror and overwritten from WaveCountDown
- * every tick, so writing it directly has no lasting effect.
- * Value below 5 breaks the internal script logic and lead to unexpected
- * behavior.
- */
-static void cmd_skip_trader(void *game_info) {
-  int wip = *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bWaveInProgress);
-  int doorsopen =
-      *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_bTradingDoorsOpen);
-  if (wip || !doorsopen) {
-    hook_socket_finish_err("not in trader time");
-    return;
-  }
-
-  // Already at or below minimum
-  int countdown =
-      *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_WaveCountDown);
-  if (countdown <= 6) {
-    hook_socket_finish_ok();
-    return;
-  }
-
-  *(int *)((uint8_t *)game_info + GAMETYPE_OFFSET_WaveCountDown) = 6;
-  hook_log_debug("SkipTrader: %d -> 6\n", countdown);
+  fstring_write(fs, new_val, new_num, "SetLiveGamePassword");
 
   hook_socket_finish_ok();
 }
@@ -1721,7 +1847,9 @@ static void cmd_skip_trader(void *game_info) {
  * Args: Section, Key [, File]
  * File is optional, omit or pass empty string to use GConfig default.
  */
-static void cmd_cfg_get_str(void) {
+static void cmd_cfg_get_str(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: Section, Key [, File]");
     return;
@@ -1733,18 +1861,9 @@ static void cmd_cfg_get_str(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
-    arg_to_ucs2(2, file, 256);
-    fp = file;
-  }
+  cfg_parse_skf(sec, key, file, &fp, 2);
 
   ucs2_t out[ARG_MAX_CHARS] = {0};
   if (!GConfig_GetString(gcfg, sec, key, out, ARG_MAX_CHARS, fp)) {
@@ -1758,6 +1877,7 @@ static void cmd_cfg_get_str(void) {
   jb_ucs2(&jb, out);
   jb_raw(&jb, "}");
 
+  hook_log_debug("CfgGetStr: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -1765,7 +1885,9 @@ static void cmd_cfg_get_str(void) {
  * Retrieves an integer value from GConfig.
  * Args: Section, Key [, File]
  */
-static void cmd_cfg_get_int(void) {
+static void cmd_cfg_get_int(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: Section, Key [, File]");
     return;
@@ -1777,18 +1899,9 @@ static void cmd_cfg_get_int(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
-    arg_to_ucs2(2, file, 256);
-    fp = file;
-  }
+  cfg_parse_skf(sec, key, file, &fp, 2);
 
   int out = 0;
   if (!GConfig_GetInt(gcfg, sec, key, &out, fp)) {
@@ -1802,6 +1915,7 @@ static void cmd_cfg_get_int(void) {
   jb_int(&jb, out);
   jb_raw(&jb, "}");
 
+  hook_log_debug("CfgGetInt: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -1809,7 +1923,9 @@ static void cmd_cfg_get_int(void) {
  * Retrieves a float value from GConfig.
  * Args: Section, Key [, File]
  */
-static void cmd_cfg_get_float(void) {
+static void cmd_cfg_get_float(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: Section, Key [, File]");
     return;
@@ -1821,18 +1937,9 @@ static void cmd_cfg_get_float(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
-    arg_to_ucs2(2, file, 256);
-    fp = file;
-  }
+  cfg_parse_skf(sec, key, file, &fp, 2);
 
   float out = 0.0f;
   if (!GConfig_GetFloat(gcfg, sec, key, &out, fp)) {
@@ -1846,6 +1953,7 @@ static void cmd_cfg_get_float(void) {
   jb_float(&jb, out);
   jb_raw(&jb, "}");
 
+  hook_log_debug("CfgGetFloat: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -1853,7 +1961,9 @@ static void cmd_cfg_get_float(void) {
  * Retrieves a boolean value from GConfig.
  * Args: Section, Key [, File]
  */
-static void cmd_cfg_get_bool(void) {
+static void cmd_cfg_get_bool(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: Section, Key [, File]");
     return;
@@ -1865,18 +1975,9 @@ static void cmd_cfg_get_bool(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
-    arg_to_ucs2(2, file, 256);
-    fp = file;
-  }
+  cfg_parse_skf(sec, key, file, &fp, 2);
 
   int out = 0;
   if (!GConfig_GetBool(gcfg, sec, key, &out, fp)) {
@@ -1890,6 +1991,7 @@ static void cmd_cfg_get_bool(void) {
   jb_bool(&jb, out);
   jb_raw(&jb, "}");
 
+  hook_log_debug("CfgGetBool: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -1901,7 +2003,9 @@ static void cmd_cfg_get_bool(void) {
  *         Default is 0 (always append).
  * Note: changes are in-memory only until CfgFlush is called.
  */
-static void cmd_cfg_set_str(void) {
+static void cmd_cfg_set_str(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 3) {
     hook_socket_finish_err("args: Section, Key, Value [, File [, Unique]]");
     return;
@@ -1913,26 +2017,21 @@ static void cmd_cfg_set_str(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t val[ARG_MAX_CHARS] = {0};
-  ucs2_t file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
+  cfg_parse_skf(sec, key, file, &fp, 3);
   arg_to_ucs2(2, val, ARG_MAX_CHARS);
 
-  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
-    arg_to_ucs2(3, file, 256);
-    fp = file;
-  }
-
+  const char *filename = fp ? g_socket_slot.req.args[3] : "KillingFloor";
   int unique =
       g_socket_slot.req.argc > 4 && strcmp(g_socket_slot.req.args[4], "1") == 0;
 
   GConfig_SetString(gcfg, sec, key, val, fp, unique);
 
+  hook_log_debug("CfgSetStr: section=%s key=%s value=%s file=%s unique=%d\n",
+                 g_socket_slot.req.args[0], g_socket_slot.req.args[1],
+                 g_socket_slot.req.args[2], filename, unique);
   hook_socket_finish_ok();
 }
 
@@ -1941,7 +2040,9 @@ static void cmd_cfg_set_str(void) {
  * Args: Section, Key, Value [, File]
  * Note: changes are in-memory only until CfgFlush is called.
  */
-static void cmd_cfg_set_int(void) {
+static void cmd_cfg_set_int(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 3) {
     hook_socket_finish_err("args: Section, Key, Value [, File]");
     return;
@@ -1953,22 +2054,18 @@ static void cmd_cfg_set_int(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
+  cfg_parse_skf(sec, key, file, &fp, 3);
 
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
-    arg_to_ucs2(3, file, 256);
-    fp = file;
-  }
-
+  const char *filename = fp ? g_socket_slot.req.args[3] : "KillingFloor";
   int v = (int)strtol(g_socket_slot.req.args[2], NULL, 10);
+
   GConfig_SetInt(gcfg, sec, key, v, fp);
 
+  hook_log_debug("CfgSetInt: section=%s key=%s value=%s file=%s\n",
+                 g_socket_slot.req.args[0], g_socket_slot.req.args[1],
+                 g_socket_slot.req.args[2], filename);
   hook_socket_finish_ok();
 }
 
@@ -1977,7 +2074,9 @@ static void cmd_cfg_set_int(void) {
  * Args: Section, Key, Value [, File]
  * Note: changes are in-memory only until CfgFlush is called.
  */
-static void cmd_cfg_set_float(void) {
+static void cmd_cfg_set_float(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 3) {
     hook_socket_finish_err("args: Section, Key, Value [, File]");
     return;
@@ -1989,22 +2088,18 @@ static void cmd_cfg_set_float(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
+  cfg_parse_skf(sec, key, file, &fp, 3);
 
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
-    arg_to_ucs2(3, file, 256);
-    fp = file;
-  }
-
+  const char *filename = fp ? g_socket_slot.req.args[3] : "KillingFloor";
   float v = strtof(g_socket_slot.req.args[2], NULL);
+
   GConfig_SetFloat(gcfg, sec, key, v, fp);
 
+  hook_log_debug("CfgSetFloat: section=%s key=%s value=%s file=%s\n",
+                 g_socket_slot.req.args[0], g_socket_slot.req.args[1],
+                 g_socket_slot.req.args[2], filename);
   hook_socket_finish_ok();
 }
 
@@ -2014,7 +2109,9 @@ static void cmd_cfg_set_float(void) {
  * Value: "1", "true", "True", "TRUE" = true, anything else = false.
  * Note: changes are in-memory only until CfgFlush is called.
  */
-static void cmd_cfg_set_bool(void) {
+static void cmd_cfg_set_bool(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 3) {
     hook_socket_finish_err("args: Section, Key, Value [, File]");
     return;
@@ -2026,24 +2123,20 @@ static void cmd_cfg_set_bool(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
+  cfg_parse_skf(sec, key, file, &fp, 3);
 
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
-    arg_to_ucs2(3, file, 256);
-    fp = file;
-  }
-
+  const char *filename = fp ? g_socket_slot.req.args[3] : "KillingFloor";
   const char *b = g_socket_slot.req.args[2];
   int v = (b[0] == '1' || strcmp(b, "true") == 0 || strcmp(b, "True") == 0 ||
            strcmp(b, "TRUE") == 0);
+
   GConfig_SetBool(gcfg, sec, key, v, fp);
 
+  hook_log_debug("CfgSetBool: section=%s key=%s value=%s file=%s\n",
+                 g_socket_slot.req.args[0], g_socket_slot.req.args[1],
+                 g_socket_slot.req.args[2], filename);
   hook_socket_finish_ok();
 }
 
@@ -2057,7 +2150,9 @@ static void cmd_cfg_set_bool(void) {
  * Buffer size is CFG_BUF_CHARS*4 UCS-2 chars,
  * very large sections may be truncated silently.
  */
-static void cmd_cfg_get_section(void) {
+static void cmd_cfg_get_section(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 1) {
     hook_socket_finish_err("args: Section [, File]");
     return;
@@ -2069,16 +2164,9 @@ static void cmd_cfg_get_section(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-
-  if (g_socket_slot.req.argc > 1 && g_socket_slot.req.args[1][0]) {
-    arg_to_ucs2(1, file, 256);
-    fp = file;
-  }
+  cfg_parse_sf(sec, file, &fp, 1);
 
   ucs2_t raw[CFG_BUF_CHARS * 4] = {0};
   GConfig_GetSection(gcfg, sec, raw, CFG_BUF_CHARS * 4, fp);
@@ -2118,6 +2206,7 @@ static void cmd_cfg_get_section(void) {
   }
   jb_raw(&jb, "]}");
 
+  hook_log_debug("CfgGetSection: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -2126,7 +2215,9 @@ static void cmd_cfg_get_section(void) {
  * Args: Section, Key, Value [, File]
  * File: optional, empty string uses GConfig default.
  */
-static void cmd_cfg_delete_str(void) {
+static void cmd_cfg_delete_str(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 3) {
     hook_socket_finish_err("args: Section, Key, Value [, File]");
     return;
@@ -2138,20 +2229,11 @@ static void cmd_cfg_delete_str(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t val[ARG_MAX_CHARS] = {0};
-  ucs2_t file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
+  cfg_parse_skf(sec, key, file, &fp, 3);
   arg_to_ucs2(2, val, ARG_MAX_CHARS);
-
-  if (g_socket_slot.req.argc > 3 && g_socket_slot.req.args[3][0]) {
-    arg_to_ucs2(3, file, 256);
-    fp = file;
-  }
 
   int deleted = cfg_delete_entries(gcfg, sec, key, val, fp, 0);
   if (deleted == 0) {
@@ -2165,6 +2247,7 @@ static void cmd_cfg_delete_str(void) {
   jb_int(&jb, deleted);
   jb_raw(&jb, "}}");
 
+  hook_log_debug("CfgDeleteStr: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -2175,7 +2258,9 @@ static void cmd_cfg_delete_str(void) {
  * Max:  optional, 0 = delete all matches, N = delete at
  * most N occurrences.
  */
-static void cmd_cfg_delete_key_str(void) {
+static void cmd_cfg_delete_key_str(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   if (g_socket_slot.req.argc < 2) {
     hook_socket_finish_err("args: Section, Key [, File [, Max]]");
     return;
@@ -2187,18 +2272,9 @@ static void cmd_cfg_delete_key_str(void) {
     return;
   }
 
-  ucs2_t sec[256] = {0};
-  ucs2_t key[256] = {0};
-  ucs2_t file[256] = {0};
+  ucs2_t sec[256] = {0}, key[256] = {0}, file[256] = {0};
   ucs2_t *fp = NULL;
-
-  arg_to_ucs2(0, sec, 256);
-  arg_to_ucs2(1, key, 256);
-
-  if (g_socket_slot.req.argc > 2 && g_socket_slot.req.args[2][0]) {
-    arg_to_ucs2(2, file, 256);
-    fp = file;
-  }
+  cfg_parse_skf(sec, key, file, &fp, 2);
 
   int max_del = g_socket_slot.req.argc > 3
                     ? (int)strtol(g_socket_slot.req.args[3], NULL, 10)
@@ -2216,6 +2292,7 @@ static void cmd_cfg_delete_key_str(void) {
   jb_int(&jb, deleted);
   jb_raw(&jb, "}}");
 
+  hook_log_debug("CfgDeleteKeyStr: %s\n", jb.buf);
   hook_socket_finish_json(&jb);
 }
 
@@ -2225,7 +2302,9 @@ static void cmd_cfg_delete_key_str(void) {
  * File: optional, empty string flushes all files.
  * Call after any CfgSet* to persist changes across level changes.
  */
-static void cmd_cfg_flush(void) {
+static void cmd_cfg_flush(cmd_ctx_t *ctx) {
+  (void)ctx;
+
   void *gcfg = get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
@@ -2240,17 +2319,80 @@ static void cmd_cfg_flush(void) {
     fp = file;
   }
 
+  const char *filename = fp ? g_socket_slot.req.args[0] : "KillingFloor";
+
   // bRead=1 -> write to disk, preserve cache
   // bRead=0 -> write then evict from cache
   GConfig_Flush(gcfg, 1, fp);
 
+  hook_log_debug("CfgFlush: flushed changes to %s.ini\n", filename);
   hook_socket_finish_ok();
 }
 
 // ============================================================================
 // COMMAND DISPATCHER
 // ============================================================================
+static const cmd_entry_t cmd_table[] = {
+    // PING
+    {"ping", cmd_ping, 0},
+    // CONSOLE
+    {"exec", cmd_exec, 1},
+    // MAP CHANGE
+    {"servertravel", cmd_server_travel, 1},
+    // ADMIN MESSAGE
+    {"say", cmd_say, 1},
+    {"announce", cmd_announce, 1},
+    // SERVER INFO
+    {"serverinfo", cmd_get_server_info, 1},
+    {"levelurl", cmd_get_level_url, 1},
+    // WAVE STATE
+    {"wavestate", cmd_get_wave_state, 1},
+    // SKIP TRADER
+    {"skiptrader", cmd_skip_trader, 1},
+    // PLAYERS
+    {"players", cmd_get_players, 1},
+    {"kick", cmd_kick, 1},
+    {"sendplayermessage", cmd_send_player_message, 1},
+    // ZEDS
+    {"zeds", cmd_get_zeds, 1},
+    {"killzeds", cmd_kill_zeds, 1},
+    // ACCESS CONTROL
+    {"gamepassword", cmd_get_game_password, 1},
+    {"adminpassword", cmd_get_admin_password, 1},
+    {"ippolicies", cmd_get_ip_policies, 1},
+    {"bannedids", cmd_get_banned_ids, 1},
+    {"banip", cmd_add_ip_ban, 1},
+    {"unbanip", cmd_remove_ip_ban, 1},
+    {"banid", cmd_add_steam_ban, 1},
+    {"unbanid", cmd_remove_steam_ban, 1},
+    // LIVE
+    {"setliveservername", cmd_set_live_server_name, 1},
+    {"setliveshortname", cmd_set_live_short_name, 1},
+    {"setliveadminname", cmd_set_live_admin_name, 1},
+    {"setliveadminmail", cmd_set_live_admin_email, 1},
+    {"setliveserverregion", cmd_set_live_server_region, 1},
+    {"setlivemotd", cmd_set_live_motd, 1},
+    {"setlivegamedifficulty", cmd_set_live_game_difficulty, 1},
+    {"setlivemaxplayer", cmd_set_live_max_players, 1},
+    {"setlivegamepassword", cmd_set_live_game_password, 1},
+    // CONFIG
+    {"cfggetstr", cmd_cfg_get_str, 1},
+    {"cfggetint", cmd_cfg_get_int, 1},
+    {"cfggetfloat", cmd_cfg_get_float, 1},
+    {"cfggetbool", cmd_cfg_get_bool, 1},
+    {"cfgsetstr", cmd_cfg_set_str, 1},
+    {"cfgsetint", cmd_cfg_set_int, 1},
+    {"cfgsetfloat", cmd_cfg_set_float, 1},
+    {"cfgsetbool", cmd_cfg_set_bool, 1},
+    {"cfgflush", cmd_cfg_flush, 1},
+    {"cfggetsection", cmd_cfg_get_section, 1},
+    {"cfgdeletestr", cmd_cfg_delete_str, 1},
+    {"cfgdeletekeystr", cmd_cfg_delete_key_str, 1},
+};
+#define CMD_TABLE_SIZE ((int)(sizeof(cmd_table) / sizeof(cmd_table[0])))
+
 void hook_command_dispatch(void) {
+  // Normalize command to lowercase
   char cmd[CMD_MAX_CHARS];
   strncpy(cmd, g_socket_slot.req.cmd, sizeof(cmd) - 1);
   cmd[sizeof(cmd) - 1] = '\0';
@@ -2264,276 +2406,26 @@ void hook_command_dispatch(void) {
   }
 #endif
 
-  hook_log_debug("Executing cmd: %s\n", cmd);
+  hook_log_debug("cmd: %s\n", cmd);
 
-  // TODO: Dispatch table
-
-  // Ping
-  if (strcmp(cmd, "ping") == 0) {
-    cmd_ping();
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-
-  // Level objects required for all remaining commands
+  // Most commands require level objects
   void *level_info = NULL, *game_info = NULL;
-  if (!get_level_objects(&level_info, &game_info)) {
-    hook_log_error("level objects not ready\n");
-    hook_socket_finish_err("level not ready");
-    return;
+
+  // Build ctx and dispatch via table
+  for (int i = 0; i < CMD_TABLE_SIZE; i++) {
+    if (strcmp(cmd, cmd_table[i].name) == 0) {
+      if (cmd_table[i].needs_level) {
+        if (!get_level_objects(&level_info, &game_info)) {
+          hook_socket_finish_err("level not ready");
+          return;
+        }
+      }
+      cmd_ctx_t ctx = {level_info, game_info};
+      cmd_table[i].fn(&ctx);
+      return;
+    }
   }
 
-  // Exec - Console
-  if (strcmp(cmd, "exec") == 0) {
-    cmd_exec();
-    return;
-  }
-
-  // Server Travel - Map Change
-  if (strcmp(cmd, "servertravel") == 0) {
-    cmd_server_travel(level_info);
-    return;
-  }
-
-  // Say - Admin Server Message
-  if (strcmp(cmd, "say") == 0) {
-    cmd_say(game_info);
-    return;
-  }
-
-  // Announce - Admin Announcement
-  if (strcmp(cmd, "announce") == 0) {
-    cmd_announce(game_info);
-    return;
-  }
-
-  // ServerInfo - Get Server Info
-  if (strcmp(cmd, "serverinfo") == 0) {
-    cmd_get_server_info();
-    return;
-  }
-
-  // LevelURL - Get Level URL with options
-  if (strcmp(cmd, "levelurl") == 0) {
-    cmd_get_level_url();
-    return;
-  }
-
-  // WaveState - Get Wave State
-  if (strcmp(cmd, "wavestate") == 0) {
-    cmd_get_wave_state();
-    return;
-  }
-
-  // SkipTrader - Set Trader Countdown to 6s
-  if (strcmp(cmd, "skiptrader") == 0) {
-    cmd_skip_trader(game_info);
-    return;
-  }
-
-  // Players - Get all connected players
-  if (strcmp(cmd, "players") == 0) {
-    cmd_get_players();
-    return;
-  }
-
-  // Kick - Kick a player by SteamID64
-  if (strcmp(cmd, "kick") == 0) {
-    cmd_kick(game_info);
-    return;
-  }
-
-  // SendPlayerMessage - Send a message to a connected player
-  if (strcmp(cmd, "sendplayermessage") == 0) {
-    cmd_send_player_message();
-    return;
-  }
-
-  // Zeds - List all living Zeds in the current wave
-  if (strcmp(cmd, "zeds") == 0) {
-    cmd_get_zeds();
-    return;
-  }
-
-  // KillZeds - Kill all living Zeds in the current wave
-  if (strcmp(cmd, "killzeds") == 0) {
-    cmd_kill_zeds();
-    return;
-  }
-
-  // GamePassword - Get the current game's password
-  if (strcmp(cmd, "gamepassword") == 0) {
-    cmd_get_game_password();
-    return;
-  }
-
-  // AdminPassword - Get the current admin's password
-  if (strcmp(cmd, "adminpassword") == 0) {
-    cmd_get_admin_password();
-    return;
-  }
-
-  // IPPolicies - Get the current IP access control policies
-  if (strcmp(cmd, "ippolicies") == 0) {
-    cmd_get_ip_policies();
-    return;
-  }
-
-  // BannedIDs - Get the current Steam ID ban list
-  if (strcmp(cmd, "bannedids") == 0) {
-    cmd_get_banned_ids();
-    return;
-  }
-
-  // BanIP - Add a new ban by IP to the banlist
-  if (strcmp(cmd, "banip") == 0) {
-    cmd_add_ip_ban();
-    return;
-  }
-
-  // UnbanIP - Remove an existing IP from the ban list
-  if (strcmp(cmd, "unbanip") == 0) {
-    cmd_remove_ip_ban();
-    return;
-  }
-
-  // Ban - Add a new ban by SteamID64 to the banlist
-  if (strcmp(cmd, "banid") == 0) {
-    cmd_add_steam_ban();
-    return;
-  }
-
-  // Unban - Remove an existing SteamID64 from the ban list
-  if (strcmp(cmd, "unbanid") == 0) {
-    cmd_remove_steam_ban();
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-
-  // SetLiveServerName - Set Server Name
-  // Do not survive a map change
-  if (strcmp(cmd, "setliveservername") == 0) {
-    cmd_set_live_server_name();
-    return;
-  }
-
-  // SetLiveShortName - Set Short Server Name
-  // Do not survive a map change
-  if (strcmp(cmd, "setliveshortname") == 0) {
-    cmd_set_live_short_name();
-    return;
-  }
-
-  // SetLiveAdminName - Set Admin Name
-  // Do not survive a map change
-  if (strcmp(cmd, "setliveadminname") == 0) {
-    cmd_set_live_admin_name();
-    return;
-  }
-
-  // SetLiveAdminMail - Set Admin Mail
-  // Do not survive a map change
-  if (strcmp(cmd, "setliveadminmail") == 0) {
-    cmd_set_live_admin_email();
-    return;
-  }
-
-  // SetLiveServerRegion - Set Server Region
-  // Do not survive a map change
-  if (strcmp(cmd, "setliveserverregion") == 0) {
-    cmd_set_live_server_region();
-    return;
-  }
-
-  // SetLiveMOTD - Set Message of the Day
-  // Do not survive a map change
-  if (strcmp(cmd, "setlivemotd") == 0) {
-    cmd_set_live_motd();
-    return;
-  }
-
-  // SetLiveGameDifficulty - Set Game Difficulty
-  // Do not survive a map change
-  if (strcmp(cmd, "setlivegamedifficulty") == 0) {
-    cmd_set_live_game_difficulty(game_info);
-    return;
-  }
-
-  // SetLiveMaxPlayer - Set Max Players
-  // Do not survive a map change
-  if (strcmp(cmd, "setlivemaxplayer") == 0) {
-    cmd_set_live_max_players(game_info);
-    return;
-  }
-
-  // SetLiveGamePassword - Set Game Password
-  // Do not survive a map change
-  if (strcmp(cmd, "setlivegamepassword") == 0) {
-    cmd_set_live_game_password();
-    return;
-  }
-
-  // --------------------------------------------------------------------------
-
-  if (strcmp(cmd, "cfggetstr") == 0) {
-    cmd_cfg_get_str();
-    return;
-  }
-
-  if (strcmp(cmd, "cfggetint") == 0) {
-    cmd_cfg_get_int();
-    return;
-  }
-
-  if (strcmp(cmd, "cfggetfloat") == 0) {
-    cmd_cfg_get_float();
-    return;
-  }
-
-  if (strcmp(cmd, "cfggetbool") == 0) {
-    cmd_cfg_get_bool();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgsetstr") == 0) {
-    cmd_cfg_set_str();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgsetint") == 0) {
-    cmd_cfg_set_int();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgsetfloat") == 0) {
-    cmd_cfg_set_float();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgsetbool") == 0) {
-    cmd_cfg_set_bool();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgflush") == 0) {
-    cmd_cfg_flush();
-    return;
-  }
-
-  if (strcmp(cmd, "cfggetsection") == 0) {
-    cmd_cfg_get_section();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgdeletestr") == 0) {
-    cmd_cfg_delete_str();
-    return;
-  }
-
-  if (strcmp(cmd, "cfgdeletekeystr") == 0) {
-    cmd_cfg_delete_key_str();
-    return;
-  }
+  hook_log_debug("Unknown command: %s\n", g_socket_slot.req.cmd);
+  hook_socket_finish_err("unknown command");
 }
