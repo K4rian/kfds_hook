@@ -14,6 +14,17 @@ static uint8_t tick_original_bytes[5];
 static UGameEngine_Tick_fn tick_trampoline = NULL;
 
 // ============================================================================
+// HOOKED FUNCTIONS
+// ============================================================================
+/*
+ * Runs on every game tick
+ */
+static void hooked_Tick(void *self, float delta_seconds) {
+  hook_engine_tick(self);
+  tick_trampoline(self, delta_seconds);
+}
+
+// ============================================================================
 // TRAMPOLINE
 // ============================================================================
 /*
@@ -25,7 +36,7 @@ static UGameEngine_Tick_fn tick_trampoline = NULL;
  *  Tick+5:     [original code]
  *  trampoline: [original 5 bytes] E9 XX XX XX X -> jmp Tick+5
  */
-void hook_install_trampoline(void) {
+void hook_trampoline_install(void) {
   void *target = (void *)ADDR_UGameEngine_Tick;
 
   uint8_t *trampoline = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -58,15 +69,4 @@ void hook_install_trampoline(void) {
 
   hook_log_debug("Tick hooked at %p, trampoline at %p\n", target,
                  (void *)trampoline);
-}
-
-// ============================================================================
-// HOOKED FUNCTIONS
-// ============================================================================
-/*
- * Runs on every game tick
- */
-void hooked_Tick(void *self, float delta_seconds) {
-  hook_engine_tick(self);
-  tick_trampoline(self, delta_seconds);
 }

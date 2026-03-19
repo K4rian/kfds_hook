@@ -633,7 +633,7 @@ void hook_debug_command_dispatch(char *cmd) {
     }
   }
 
-  hook_log_debug("Unknown debug command: %s\n", g_socket_slot.req.cmd);
+  hook_log_error("Unknown debug command: %s\n", g_socket_slot.req.cmd);
   hook_socket_finish_err("unknown debug command");
 }
 

@@ -725,7 +725,8 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
     if (pawn) {
       health = *(int *)((uint8_t *)pawn + APAWN_OFFSET_Health);
       float shield;
-      memcpy(&shield, (uint8_t *)pawn + APAWN_OFFSET_ShieldStrength, sizeof(shield));
+      memcpy(&shield, (uint8_t *)pawn + APAWN_OFFSET_ShieldStrength,
+             sizeof(shield));
       armor = (int)shield;
     }
 
@@ -854,8 +855,9 @@ static void cmd_kick(cmd_ctx_t *ctx) {
     if (steamid != target)
       continue;
 
-    hook_log_debug("Kick: matched pc=%p steamid=%" PRIu64 " target=%" PRIu64 "\n", pc,
-                   steamid, target);
+    hook_log_debug("Kick: matched pc=%p steamid=%" PRIu64 " target=%" PRIu64
+                   "\n",
+                   pc, steamid, target);
 
     // Get the player's name
     void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
@@ -1237,8 +1239,8 @@ static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
 
   TArrayFString *arr =
       (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
-  hook_log_debug("AddIPBan: IPPolicies Data=%p Num=%d Max=%d\n",
-                 (void *)arr->Data, arr->Num, arr->Max);
+  hook_log_debug("BanIP: IPPolicies Data=%p Num=%d Max=%d\n", (void *)arr->Data,
+                 arr->Num, arr->Max);
 
   if (!arr->Data || arr->Num >= arr->Max) {
     hook_socket_finish_err("IPPolicies TArray full or uninitialized");
@@ -1268,15 +1270,12 @@ static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
   // Write new FString entry into the next TArray slot
   FString_ctor(&arr->Data[arr->Num], policy_ucs2);
   arr->Num++;
-  hook_log_debug("AddIPBan: added \"%s\" at slot %d\n", policy_utf8,
-                 arr->Num - 1);
+  hook_log_debug("BanIP: added \"%s\" at slot %d\n", policy_utf8, arr->Num - 1);
 
   // Record in session list for repopulate_bans() after ServerTravel
   hook_policy_add_session_ip_ban(policy_utf8);
 
   // Persist to GConfig
-  // ucs2_t val[64] = {0};
-  // utf8_to_ucs2(policy_utf8, val, 64);
   void *gcfg = get_gconfig();
 
   GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, policy_ucs2, BAN_FILE, 0);
@@ -1320,8 +1319,8 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
 
   TArrayFString *arr =
       (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
-  hook_log_debug("RemoveIPBan: IPPolicies Num=%d searching for \"%s\"\n",
-                 arr->Num, policy_utf8);
+  hook_log_debug("UnbanIP: IPPolicies Num=%d searching for \"%s\"\n", arr->Num,
+                 policy_utf8);
 
   if (!arr->Data || arr->Num <= 0) {
     hook_socket_finish_err("IPPolicies TArray empty or uninitialized");
@@ -1337,7 +1336,7 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
     char utf8[128] = {0};
     ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
     if (strcasecmp(utf8, policy_utf8) == 0) {
-      hook_log_debug("RemoveIPBan: removing live slot %d \"%s\"\n", i, utf8);
+      hook_log_debug("UnbanIP: removing live slot %d \"%s\"\n", i, utf8);
       tarray_fstring_remove(arr, i);
       live_removed++;
     }
@@ -1359,7 +1358,7 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
     }
   }
 
-  hook_log_debug("RemoveIPBan: live=%d cfg=%d session=%d\n", live_removed,
+  hook_log_debug("UnbanIP: live=%d cfg=%d session=%d\n", live_removed,
                  cfg_removed, sess_removed);
 
   if (live_removed == 0 && cfg_removed == 0) {
@@ -1395,8 +1394,8 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
 
   TArrayFString *arr =
       (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
-  hook_log_debug("AddSteamBan: BannedIDs Data=%p Num=%d Max=%d\n",
-                 (void *)arr->Data, arr->Num, arr->Max);
+  hook_log_debug("BanID: BannedIDs Data=%p Num=%d Max=%d\n", (void *)arr->Data,
+                 arr->Num, arr->Max);
 
   // Bootstrap uninitialized TArray
   if (!arr->Data || arr->Max == 0) {
@@ -1408,7 +1407,7 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
     }
     arr->Num = 0;
     arr->Max = POLICY_BANNEDIDS_INITIAL_MAX;
-    hook_log_debug("AddSteamBan: bootstrapped BannedIDs TArray Max=%d\n",
+    hook_log_debug("BanID: bootstrapped BannedIDs TArray Max=%d\n",
                    POLICY_BANNEDIDS_INITIAL_MAX);
   }
 
@@ -1444,15 +1443,12 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
 
   FString_ctor(&arr->Data[arr->Num], entry_ucs2);
   arr->Num++;
-  hook_log_debug("AddSteamBan: added \"%s\" at slot %d\n", entry_utf8,
-                 arr->Num - 1);
+  hook_log_debug("BanID: added \"%s\" at slot %d\n", entry_utf8, arr->Num - 1);
 
   // Record in session list for repopulate_bans() after ServerTravel
   hook_policy_add_session_steam_ban(entry_utf8);
 
   // Persist to GConfig
-  // ucs2_t val[ARG_MAX_CHARS] = {0};
-  // utf8_to_ucs2(entry_utf8, val, ARG_MAX_CHARS);
   void *gcfg = get_gconfig();
 
   GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, entry_ucs2, BAN_FILE, 0);
@@ -1487,8 +1483,8 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
 
   TArrayFString *arr =
       (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
-  hook_log_debug("RemoveSteamBan: BannedIDs Num=%d searching for \"%s\"\n",
-                 arr->Num, target_id);
+  hook_log_debug("UnbanID: BannedIDs Num=%d searching for \"%s\"\n", arr->Num,
+                 target_id);
 
   if (!arr->Data || arr->Num <= 0) {
     hook_socket_finish_err("BannedIDs TArray empty or uninitialized");
@@ -1506,7 +1502,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
     char id_part[32] = {0};
     extract_steamid_prefix(utf8, id_part, sizeof(id_part));
     if (strcmp(id_part, target_id) == 0) {
-      hook_log_debug("RemoveSteamBan: removing live slot %d \"%s\"\n", i, utf8);
+      hook_log_debug("UnbanID: removing live slot %d \"%s\"\n", i, utf8);
       tarray_fstring_remove(arr, i);
       live_removed++;
     }
@@ -1555,8 +1551,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
       if (strcmp(id_part, target_id) != 0)
         continue;
 
-      hook_log_debug("RemoveSteamBan: removing from GConfig: \"%s\"\n",
-                     val_utf8);
+      hook_log_debug("UnbanID: removing from GConfig: \"%s\"\n", val_utf8);
       cfg_delete_entries(gcfg, BAN_SECTION, BAN_KEY_STEAM, eval, BAN_FILE, 0);
       cfg_removed++;
       scanning = 1; // re-read after mutation
@@ -1578,7 +1573,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
     }
   }
 
-  hook_log_debug("RemoveSteamBan: live=%d cfg=%d session=%d\n", live_removed,
+  hook_log_debug("UnbanID: live=%d cfg=%d session=%d\n", live_removed,
                  cfg_removed, sess_removed);
 
   if (live_removed == 0 && cfg_removed == 0) {
@@ -1747,8 +1742,9 @@ static void cmd_set_live_game_difficulty(cmd_ctx_t *ctx) {
 
     // GameDiff (float), cosmetic copy, drives tab overlay difficulty name.
     memcpy((uint8_t *)gri + GRI_OFFSET_GameDiff, &new_diff, sizeof(new_diff));
-    hook_log_debug("SetLiveGameDifficulty: GRI+0x%x (GameDiff) synced to %.6g\n",
-                   GRI_OFFSET_GameDiff, (double)new_diff);
+    hook_log_debug(
+        "SetLiveGameDifficulty: GRI+0x%x (GameDiff) synced to %.6g\n",
+        GRI_OFFSET_GameDiff, (double)new_diff);
   } else {
     hook_log_debug("SetLiveGameDifficulty: GRI not found, "
                    "BaseDifficulty and GameDiff not updated\n");
@@ -2426,6 +2422,6 @@ void hook_command_dispatch(void) {
     }
   }
 
-  hook_log_debug("Unknown command: %s\n", g_socket_slot.req.cmd);
+  hook_log_error("Unknown command: %s\n", g_socket_slot.req.cmd);
   hook_socket_finish_err("unknown command");
 }

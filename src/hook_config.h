@@ -14,6 +14,7 @@
 // ============================================================================
 typedef struct {
   int hook_enabled;           // 0 = skip hook installation entirely
+  int security_patch;         // 0 = enable file security check
   char ucc_checksum[65];      // SHA256 hex to verify, empty = skip
   hook_log_level_t log_level; // debug, info, warn, error, silent
   char log_file[256];         // path for file logging, empty = stderr only

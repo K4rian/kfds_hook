@@ -1,9 +1,9 @@
-#ifndef HOOK_TRAMPOLINE_H
-#define HOOK_TRAMPOLINE_H
+#ifndef HOOK_SECURITY_H
+#define HOOK_SECURITY_H
 
 // ============================================================================
-// TRAMPOLINE
+// SECURITY
 // ============================================================================
-void hook_trampoline_install(void);
+void hook_security_patch(void);
 
-#endif /* HOOK_TRAMPOLINE_H */
+#endif /* HOOK_SECURITY_H */

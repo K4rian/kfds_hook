@@ -3,6 +3,7 @@
 
 #include "hook_config.h"
 #include "hook_log.h"
+#include "hook_security.h"
 #include "hook_socket.h"
 #include "hook_trampoline.h"
 #include "kfds_hook.h"
@@ -45,8 +46,11 @@ __attribute__((constructor)) static void hook_attach(void) {
     return;
   }
 
+  if (g_config.security_patch)
+    hook_security_patch();
+
   hook_socket_start();
-  hook_install_trampoline();
+  hook_trampoline_install();
 
   hook_log_info("kfds_hook init complete\n");
 }

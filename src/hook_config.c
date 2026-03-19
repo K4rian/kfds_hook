@@ -11,6 +11,7 @@
 // ============================================================================
 hook_config_t g_config = {
     .hook_enabled = 1,
+    .security_patch = 1,
     .ucc_checksum = KFDS_UCC_CHECKSUM,
 #ifdef DEBUG
     .log_level = HOOK_LOG_LEVEL_DEBUG,
@@ -36,22 +37,24 @@ static int config_handler(void *user, const char *section, const char *name,
 #define MATCH(s, n) (strcmp(section, s) == 0 && strcmp(name, n) == 0)
   if (MATCH("hook", "hook_enabled")) {
     c->hook_enabled = atoi(value);
+  } else if (MATCH("hook", "security_patch")) {
+    c->security_patch = atoi(value);
   } else if (MATCH("hook", "ucc_checksum")) {
     strncpy(c->ucc_checksum, value, 64);
     c->ucc_checksum[64] = '\0';
   } else if (MATCH("hook", "log_level")) {
     if (strcmp(value, "debug") == 0)
-      g_config.log_level = HOOK_LOG_LEVEL_DEBUG;
+      c->log_level = HOOK_LOG_LEVEL_DEBUG;
     else if (strcmp(value, "info") == 0)
-      g_config.log_level = HOOK_LOG_LEVEL_INFO;
+      c->log_level = HOOK_LOG_LEVEL_INFO;
     else if (strcmp(value, "warn") == 0)
-      g_config.log_level = HOOK_LOG_LEVEL_WARN;
+      c->log_level = HOOK_LOG_LEVEL_WARN;
     else if (strcmp(value, "error") == 0)
-      g_config.log_level = HOOK_LOG_LEVEL_ERROR;
+      c->log_level = HOOK_LOG_LEVEL_ERROR;
     else if (strcmp(value, "silent") == 0)
-      g_config.log_level = HOOK_LOG_LEVEL_SILENT;
+      c->log_level = HOOK_LOG_LEVEL_SILENT;
     else
-      g_config.log_level = HOOK_LOG_LEVEL_INFO;
+      c->log_level = HOOK_LOG_LEVEL_INFO;
   } else if (MATCH("hook", "log_file")) {
     strncpy(c->log_file, value, sizeof(c->log_file) - 1);
   } else if (MATCH("socket", "socket_path")) {
