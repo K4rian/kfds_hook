@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,13 +25,21 @@ static const char *const log_prefixes[] = {
     [HOOK_LOG_LEVEL_ERROR] = "ERROR",
 };
 static FILE *log_file = NULL;
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ============================================================================
 // LOG FILE
 // ============================================================================
+/*
+ * Writes an ISO-8601 UTC timestamp with millisecond precision to fp.
+ * Format: YYYY-MM-DD HH:MM:SS.mmmZ
+ */
 static void log_write_timestamp(FILE *fp) {
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
+  struct timespec ts = {0};
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+    fprintf(stderr, "[WARN] kfds_hook: clock_gettime failed: %s\n",
+            strerror(errno));
+
   struct tm tm_info;
   gmtime_r(&ts.tv_sec, &tm_info);
   char tbuf[32];
@@ -38,6 +47,10 @@ static void log_write_timestamp(FILE *fp) {
   fprintf(fp, "%s.%03ldZ", tbuf, ts.tv_nsec / 1000000);
 }
 
+/*
+ * Writes a visual separator line with the current timestamp to fp.
+ * Used to mark the start of each log session and post-rotation.
+ */
 static void log_write_separator(FILE *fp) {
   fprintf(fp, "\n================== ");
   log_write_timestamp(fp);
@@ -46,16 +59,17 @@ static void log_write_separator(FILE *fp) {
 }
 
 /*
- * Rotate log files if the current log exceeds LOG_MAX_BYTES
+ * Rotate log files if the current log exceeds LOG_MAX_BYTES.
  * Rotation follows the logrotate convention:
  *   X.log.5 deleted
  *   X.log.4 -> X.log.5
  *   ...
  *   X.log.1 -> X.log.2
  *   X.log   -> X.log.1
- * A fresh X.log is then opened
+ * A fresh X.log is then opened.
  *
- * log_file is closed and reopened on rotation
+ * log_file is closed and reopened on rotation.
+ * Must be called with log_mutex held.
  */
 static void log_rotate(const char *log_path) {
   if (!log_file)
@@ -63,6 +77,10 @@ static void log_rotate(const char *log_path) {
 
   // Check current file size
   long size = ftell(log_file);
+  if (size < 0) {
+    fprintf(stderr, "[WARN] kfds_hook: ftell failed: %s\n", strerror(errno));
+    return;
+  }
   if (size < LOG_MAX_BYTES)
     return;
 
@@ -92,6 +110,11 @@ static void log_rotate(const char *log_path) {
   log_write_separator(log_file);
 }
 
+/*
+ * Opens the log file at path, appending to any existing content.
+ * Writes a session separator on success.
+ * Called during hook init from a single thread, no locking needed.
+ */
 void hook_log_open(const char *path) {
   hook_log_close();
 
@@ -104,6 +127,10 @@ void hook_log_open(const char *path) {
   log_write_separator(log_file);
 }
 
+/*
+ * Closes the log file if open.
+ * Called during hook teardown from a single thread, no locking needed.
+ */
 void hook_log_close(void) {
   if (log_file) {
     fclose(log_file);
@@ -114,15 +141,29 @@ void hook_log_close(void) {
 // ============================================================================
 // LOG
 // ============================================================================
+/*
+ * Writes a log message at the given level to stderr and, if open, to the
+ * log file. Messages below the user-defined log level are discarded.
+ *
+ * File format:   [kfds_hook] <DATE> [<PREFIX>] <MESSAGE>
+ * stderr format: [kfds_hook] [<PREFIX>] <MESSAGE>
+ *
+ * Thread-safe: log_mutex serialises access to log_file across threads.
+ * The _Thread_local re-entrance guard prevents recursive logging within
+ * the same thread (e.g. if a logging helper itself calls hook_log).
+ */
 void hook_log(hook_log_level_t level, const char *fmt, ...) {
   if (level < g_config.log_level)
     return;
 
-  // Re-entrance guard
+  // Re-entrance guard: prevents recursive logging within the same thread
   static _Thread_local int active = 0;
   if (active)
     return;
   active = 1;
+
+  // Lock before any access to the log file
+  pthread_mutex_lock(&log_mutex);
 
   if (log_file)
     log_rotate(g_config.log_file);
@@ -142,8 +183,6 @@ void hook_log(hook_log_level_t level, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
 
-    // File format:   [kfds_hook] <DATE> [<PREFIX>] <MESSAGE>
-    // stderr format: [kfds_hook] [<PREFIX>] <MESSAGE>
     if (targets[i] == log_file) {
       fprintf(targets[i], "[kfds_hook] ");
       log_write_timestamp(targets[i]);
@@ -158,5 +197,6 @@ void hook_log(hook_log_level_t level, const char *fmt, ...) {
     if (targets[i] == log_file)
       fflush(log_file);
   }
+  pthread_mutex_unlock(&log_mutex);
   active = 0;
 }

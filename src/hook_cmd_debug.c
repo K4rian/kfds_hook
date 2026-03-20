@@ -113,24 +113,6 @@ static FILE *dump_open(const char *cmd_name, const char *override_path,
   return f;
 }
 
-/*
- * Retrieves the actor list and count from the current level.
- * Returns 1 and populates out_actors/out_count on success, 0 if not ready.
- */
-static int get_actor_list(void ***out_actors, int *out_count) {
-  void *engine = hook_engine_get();
-  if (!engine)
-    return 0;
-
-  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
-  if (!level)
-    return 0;
-
-  *out_actors = *(void ***)((uint8_t *)level + ULEVEL_OFFSET_Actors);
-  *out_count = *(int *)((uint8_t *)level + ULEVEL_OFFSET_Actors_Num);
-  return 1;
-}
-
 // ============================================================================
 // DEBUG COMMANDS
 // ============================================================================
@@ -151,7 +133,7 @@ void cmd_debug_gri_dump(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     fclose(f);
     hook_socket_finish_err("GRI not found");
@@ -192,7 +174,7 @@ void cmd_debug_pri_dump(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     fclose(f);
     hook_socket_finish_err("GRI not found");
@@ -261,7 +243,7 @@ void cmd_debug_actors_dump(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count)) {
+  if (!hook_engine_get_level_actors(&actors, &actor_count)) {
     fclose(f);
     return;
   }
@@ -320,7 +302,7 @@ void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count)) {
+  if (!hook_engine_get_level_actors(&actors, &actor_count)) {
     fclose(f);
     return;
   }
@@ -330,7 +312,7 @@ void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
     void *actor = actors[i];
     if (!actor)
       continue;
-    if (!is_player_controller(UObject_GetName(actor)))
+    if (!hook_engine_is_player_controller(UObject_GetName(actor)))
       continue;
 
     void *netconn =
@@ -393,7 +375,7 @@ void cmd_debug_pcpawn_dump(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count)) {
+  if (!hook_engine_get_level_actors(&actors, &actor_count)) {
     fclose(f);
     return;
   }
@@ -403,7 +385,7 @@ void cmd_debug_pcpawn_dump(cmd_ctx_t *ctx) {
     void *actor = actors[i];
     if (!actor)
       continue;
-    if (!is_player_controller(UObject_GetName(actor)))
+    if (!hook_engine_is_player_controller(UObject_GetName(actor)))
       continue;
 
     void *netconn =
@@ -473,14 +455,14 @@ void cmd_debug_pcnetconn_dump(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count)) {
+  if (!hook_engine_get_level_actors(&actors, &actor_count)) {
     fclose(f);
     return;
   }
 
   for (int i = 0; i < actor_count; i++) {
     void *actor = actors[i];
-    if (!actor || !is_player_controller(UObject_GetName(actor)))
+    if (!actor || !hook_engine_is_player_controller(UObject_GetName(actor)))
       continue;
 
     void *netconn =
@@ -564,7 +546,7 @@ void cmd_debug_cfg_empty_section(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -622,7 +604,7 @@ void hook_debug_command_dispatch(char *cmd) {
   for (int i = 0; i < DEBUG_CMD_TABLE_SIZE; i++) {
     if (strcmp(cmd, debug_cmd_table[i].name) == 0) {
       if (debug_cmd_table[i].needs_level) {
-        if (!get_level_objects(&level_info, &game_info)) {
+        if (!hook_engine_get_level_info(&level_info, &game_info)) {
           hook_socket_finish_err("level not ready");
           return;
         }

@@ -365,20 +365,22 @@ extern GConfig_EmptySection_fn GConfig_EmptySection;
 // ============================================================================
 void hook_engine_tick(void *self);
 void *hook_engine_get(void);
+void *hook_engine_get_gconfig(void);
 
 // ============================================================================
 // ENGINE HELPERS
 // ============================================================================
-int is_server_busy(void);
-int is_game_started(void);
-int is_player_controller(const ucs2_t *name);
-int is_zed_actor(const ucs2_t *name);
+int hook_engine_is_server_busy(void);
+int hook_engine_is_game_started(void);
+int hook_engine_is_player_controller(const ucs2_t *name);
+int hook_engine_is_zed_actor(const ucs2_t *name);
 
-int get_level_objects(void **out_level_info, void **out_game_info);
-void *get_gconfig(void);
+void *hook_engine_get_level(void);
+int hook_engine_get_level_actors(void ***out_actors, int *out_count);
+int hook_engine_get_level_info(void **out_level_info, void **out_game_info);
 
-void *find_gri(void);
-void *find_access_control(void);
+void *hook_engine_get_gri(void);
+void *hook_engine_get_access_control(void);
 
 // clang-format on
 #endif /* HOOK_ENGINE_H */

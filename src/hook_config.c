@@ -20,7 +20,7 @@ hook_config_t g_config = {
 #endif
     .log_file = "",
     .socket_path = "/tmp/kfds_hook.sock",
-    .socket_maxpoll = 100,
+    .socket_maxpoll = 10,
     .socket_deadline = 2,
     .debug_dump_dir = "./dump",
 };
@@ -28,6 +28,12 @@ hook_config_t g_config = {
 // ============================================================================
 // CONFIG HANDLER
 // ============================================================================
+/*
+ * Called once per key/value pair found in the config file.
+ * Populates the hook_config_t pointed to by user.
+ * Returns 1 to continue parsing, 0 to abort.
+ * Unknown keys are silently ignored to allow forward-compatible config files.
+ */
 static int config_handler(void *user, const char *section, const char *name,
                           const char *value) {
   hook_config_t *c = (hook_config_t *)user;
@@ -40,8 +46,8 @@ static int config_handler(void *user, const char *section, const char *name,
   } else if (MATCH("hook", "security_patch")) {
     c->security_patch = atoi(value);
   } else if (MATCH("hook", "ucc_checksum")) {
-    strncpy(c->ucc_checksum, value, 64);
-    c->ucc_checksum[64] = '\0';
+    strncpy(c->ucc_checksum, value, sizeof(c->ucc_checksum) - 1);
+    c->ucc_checksum[sizeof(c->ucc_checksum) - 1] = '\0';
   } else if (MATCH("hook", "log_level")) {
     if (strcmp(value, "debug") == 0)
       c->log_level = HOOK_LOG_LEVEL_DEBUG;
@@ -61,10 +67,14 @@ static int config_handler(void *user, const char *section, const char *name,
     strncpy(c->socket_path, value, sizeof(c->socket_path) - 1);
   } else if (MATCH("socket", "socket_maxpoll")) {
     c->socket_maxpoll = atoi(value);
+    if (c->socket_maxpoll < 0)
+      c->socket_maxpoll = 0;
   } else if (MATCH("socket", "socket_deadline")) {
     c->socket_deadline = atoi(value);
     if (c->socket_deadline < 1)
       c->socket_deadline = 1;
+    else if (c->socket_deadline > 30)
+      c->socket_deadline = 30;
   } else if (MATCH("debug", "debug_dump_dir")) {
     strncpy(c->debug_dump_dir, value, sizeof(c->debug_dump_dir) - 1);
   }
@@ -75,12 +85,19 @@ static int config_handler(void *user, const char *section, const char *name,
 // ============================================================================
 // CONFIG
 // ============================================================================
+/*
+ * Loads configuration from the file at KFDS_HOOK_CONFIG (env) or
+ * ./kfds_hook.ini (default). Use default values as fallback.
+ * Parse errors are logged but do not abort, successfully parsed keys are
+ * applied and the rest remain at their defaults.
+ * Also opens the log file, verifies the binary checksum if configured,
+ * and dumps the resolved config at debug level.
+ */
 void hook_load_config(void) {
-  // Resolve config path env override
+  // Parse config file
   const char *path = getenv("KFDS_HOOK_CONFIG");
   if (!path || !*path)
     path = "./kfds_hook.ini";
-
   int r = ini_parse(path, config_handler, &g_config);
 
   // Open the log file now before the first log call
@@ -88,7 +105,7 @@ void hook_load_config(void) {
     hook_log_open(g_config.log_file);
 
   if (r == -1) {
-    // File not found, silently use defaults
+    // File not found: warn and continue with defaults
     hook_log_warn("no config file at %s, using defaults\n", path);
   } else if (r > 0) {
     hook_log_error("config parse error at line %d in %s\n", r, path);
@@ -96,7 +113,7 @@ void hook_load_config(void) {
     hook_log_info("config loaded from %s\n", path);
   }
 
-  // Verify ucc-bin-real checksum if set
+  // Verify binary checksum if set
   if (g_config.ucc_checksum[0]) {
     char actual[65];
     if (!sha256_file("/proc/self/exe", actual)) {
@@ -106,7 +123,7 @@ void hook_load_config(void) {
       hook_log_error("FATAL: binary checksum mismatch!\n");
       hook_log_error("  expected: %s\n", g_config.ucc_checksum);
       hook_log_error("  actual:   %s\n", actual);
-      hook_log_error("  Hook installation aborded. Update ucc_checksum in "
+      hook_log_error("  Hook installation aborted. Update ucc_checksum in "
                      "kfds_hook.ini.\n");
       g_config.hook_enabled = 0;
     } else {
@@ -114,6 +131,7 @@ void hook_load_config(void) {
     }
   }
 
+  // Dump resolved config at debug level
   hook_log_debug("log_level=%d log_file=%s socket=%s maxpoll=%d/s deadline=%ds "
                  "debug_dump_dir=%s\n",
                  g_config.log_level, g_config.log_file, g_config.socket_path,

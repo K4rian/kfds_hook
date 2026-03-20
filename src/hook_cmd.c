@@ -95,7 +95,7 @@ static void fstring_write(FString *fstr, const ucs2_t *new_val, int new_num,
  * Returns 1 on success, 0 if GRI is not found (response already set).
  */
 static int gri_set_str(int offset, const char *value, const char *label) {
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
     return 0;
@@ -119,7 +119,7 @@ static int gri_set_str(int offset, const char *value, const char *label) {
  * value is a decimal string converted afterward.
  */
 static int gri_set_int(int offset, const char *value, const char *label) {
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
     return 0;
@@ -256,24 +256,6 @@ static void extract_steamid_prefix(const char *src, char *dst,
 }
 
 /*
- * Retrieves the actor list and count from the current level.
- * Returns 1 and populates out_actors/out_count on success, 0 if not ready.
- */
-static int get_actor_list(void ***out_actors, int *out_count) {
-  void *engine = hook_engine_get();
-  if (!engine)
-    return 0;
-
-  void *level = *(void **)((uint8_t *)engine + UGAMEENGINE_OFFSET_Level);
-  if (!level)
-    return 0;
-
-  *out_actors = *(void ***)((uint8_t *)level + ULEVEL_OFFSET_Actors);
-  *out_count = *(int *)((uint8_t *)level + ULEVEL_OFFSET_Actors_Num);
-  return 1;
-}
-
-/*
  * Broadcasts a message to all players via AGameInfo::eventBroadcast.
  * fname_index controls chat channel styling.
  */
@@ -292,7 +274,7 @@ static void broadcast_msg(cmd_ctx_t *ctx, int fname_index) {
  * Returns empty string if the field is unset.
  */
 static void ac_fstring_read(int offset, const char *label) {
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -386,7 +368,7 @@ static void cmd_exec(cmd_ctx_t *ctx) {
 static void cmd_get_server_info(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
     return;
@@ -527,7 +509,7 @@ static void cmd_get_level_url(cmd_ctx_t *ctx) {
 static void cmd_get_wave_state(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void *gri = find_gri();
+  void *gri = hook_engine_get_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
     return;
@@ -561,7 +543,7 @@ static void cmd_get_wave_state(cmd_ctx_t *ctx) {
   jb_raw(&jb, fbuf);
 
   jb_raw(&jb, ",\"game_started\":");
-  jb_bool(&jb, is_game_started());
+  jb_bool(&jb, hook_engine_is_game_started());
   jb_raw(&jb, "}}");
 
   hook_log_debug("WaveState: %s\n", jb.buf);
@@ -672,7 +654,7 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count))
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
     return;
 
   json_buf_t jb;
@@ -684,7 +666,7 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
     void *actor = actors[i];
     if (!actor)
       continue;
-    if (!is_player_controller(UObject_GetName(actor)))
+    if (!hook_engine_is_player_controller(UObject_GetName(actor)))
       continue;
 
     void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
@@ -821,7 +803,7 @@ static void cmd_kick(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count))
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
     return;
 
   int kicked = 0;
@@ -903,7 +885,7 @@ static void cmd_send_player_message(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count))
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
     return;
 
   // Build prefixed message
@@ -932,7 +914,7 @@ static void cmd_send_player_message(cmd_ctx_t *ctx) {
     void *actor = actors[i];
     if (!actor)
       continue;
-    if (!is_player_controller(UObject_GetName(actor)))
+    if (!hook_engine_is_player_controller(UObject_GetName(actor)))
       continue;
 
     void *netconn =
@@ -989,7 +971,7 @@ static void cmd_get_zeds(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count))
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
     return;
 
   json_buf_t jb;
@@ -1003,7 +985,7 @@ static void cmd_get_zeds(cmd_ctx_t *ctx) {
       continue;
 
     const ucs2_t *name = UObject_GetName(actor);
-    if (!is_zed_actor(name))
+    if (!hook_engine_is_zed_actor(name))
       continue;
 
     int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
@@ -1047,7 +1029,7 @@ static void cmd_kill_zeds(cmd_ctx_t *ctx) {
 
   void **actors = NULL;
   int actor_count = 0;
-  if (!get_actor_list(&actors, &actor_count))
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
     return;
 
   int killed = 0;
@@ -1055,7 +1037,7 @@ static void cmd_kill_zeds(cmd_ctx_t *ctx) {
     void *actor = actors[i];
     if (!actor)
       continue;
-    if (!is_zed_actor(UObject_GetName(actor)))
+    if (!hook_engine_is_zed_actor(UObject_GetName(actor)))
       continue;
 
     int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
@@ -1114,7 +1096,7 @@ static void cmd_get_admin_password(cmd_ctx_t *ctx) {
 static void cmd_get_ip_policies(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1159,7 +1141,7 @@ static void cmd_get_ip_policies(cmd_ctx_t *ctx) {
 static void cmd_get_banned_ids(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1231,7 +1213,7 @@ static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1276,7 +1258,7 @@ static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
   hook_policy_add_session_ip_ban(policy_utf8);
 
   // Persist to GConfig
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
 
   GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, policy_ucs2, BAN_FILE, 0);
   GConfig_Flush(gcfg, 1, BAN_FILE);
@@ -1299,7 +1281,7 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1345,7 +1327,7 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
   // GConfig removal
   ucs2_t val[64] = {0};
   utf8_to_ucs2(policy_utf8, val, 64);
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   int cfg_removed =
       cfg_delete_entries(gcfg, BAN_SECTION, BAN_KEY_IP, val, BAN_FILE, 0);
 
@@ -1386,7 +1368,7 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1449,7 +1431,7 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
   hook_policy_add_session_steam_ban(entry_utf8);
 
   // Persist to GConfig
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
 
   GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, entry_ucs2, BAN_FILE, 0);
   GConfig_Flush(gcfg, 1, BAN_FILE);
@@ -1473,7 +1455,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1511,7 +1493,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
   // GConfig removal, read section, find entries starting with target_id,
   // delete each by exact value (including stored name) via cfg_delete_entries
   // Re-read after each deletion to avoid stale buffer pointers
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   int cfg_removed = 0;
   ucs2_t raw[CFG_BUF_CHARS * 4];
 
@@ -1729,8 +1711,8 @@ static void cmd_set_live_game_difficulty(cmd_ctx_t *ctx) {
                  (double)new_diff);
 
   // Sync GRI fields so the UI stays consistent.
-  // find_gri() may return NULL during a level transition.
-  void *gri = find_gri();
+  // May return NULL during a level transition.
+  void *gri = hook_engine_get_gri();
   if (gri) {
     // BaseDifficulty drives the difficulty string and wave counter
     // display in the lobby and scoreboard. Written as a single byte.
@@ -1817,7 +1799,7 @@ static void cmd_set_live_game_password(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
     return;
@@ -1851,7 +1833,7 @@ static void cmd_cfg_get_str(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -1889,7 +1871,7 @@ static void cmd_cfg_get_int(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -1927,7 +1909,7 @@ static void cmd_cfg_get_float(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -1965,7 +1947,7 @@ static void cmd_cfg_get_bool(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2007,7 +1989,7 @@ static void cmd_cfg_set_str(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2044,7 +2026,7 @@ static void cmd_cfg_set_int(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2078,7 +2060,7 @@ static void cmd_cfg_set_float(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2113,7 +2095,7 @@ static void cmd_cfg_set_bool(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2154,7 +2136,7 @@ static void cmd_cfg_get_section(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2219,7 +2201,7 @@ static void cmd_cfg_delete_str(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2262,7 +2244,7 @@ static void cmd_cfg_delete_key_str(cmd_ctx_t *ctx) {
     return;
   }
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2301,7 +2283,7 @@ static void cmd_cfg_delete_key_str(cmd_ctx_t *ctx) {
 static void cmd_cfg_flush(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void *gcfg = get_gconfig();
+  void *gcfg = hook_engine_get_gconfig();
   if (!gcfg) {
     hook_socket_finish_err("GConfig not ready");
     return;
@@ -2411,7 +2393,7 @@ void hook_command_dispatch(void) {
   for (int i = 0; i < CMD_TABLE_SIZE; i++) {
     if (strcmp(cmd, cmd_table[i].name) == 0) {
       if (cmd_table[i].needs_level) {
-        if (!get_level_objects(&level_info, &game_info)) {
+        if (!hook_engine_get_level_info(&level_info, &game_info)) {
           hook_socket_finish_err("level not ready");
           return;
         }

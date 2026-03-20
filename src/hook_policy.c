@@ -11,6 +11,7 @@
 /*
  * Session ban lists, rebuilt into live AccessControl TArrays after each
  * level change.
+ *
  * Entries are plain UTF-8 strings:
  *   IP bans:    "DENY;<ip>"
  *   Steam bans: "<steamid64> <name>"
@@ -33,11 +34,12 @@ static int repopulate_bans_pending = 0;
  * Re-appends session ban entries to the live AccessControl TArrays after a
  * level change. The engine reloads IPPolicies and BannedIDs from ini on
  * ServerTravel, any bans added this session must be re-injected.
+ *
  * IP bans:    TArray is always pre-allocated by the engine, cap at Max.
  * Steam bans: TArray may be uninitialized if ini had no BannedIDs at startup.
  */
 static void repopulate_bans(void) {
-  void *ac = find_access_control();
+  void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_log_debug("repopulate_bans: AccessControl not found\n");
     return;
@@ -76,7 +78,7 @@ static void repopulate_bans(void) {
     if (!st_arr->Data) {
       hook_log_warn("repopulate_bans: BannedIDs TArray alloc failed "
                     "| steam bans lost\n");
-      goto repopulate_done;
+      goto done;
     }
     st_arr->Num = 0;
     st_arr->Max = POLICY_BANNEDIDS_INITIAL_MAX;
@@ -98,7 +100,7 @@ static void repopulate_bans(void) {
                    session_steam_bans[i]);
   }
 
-repopulate_done:
+done:
   hook_log_debug("repopulate_bans: done | IPPolicies Num=%d, "
                  "BannedIDs Num=%d\n",
                  ip_arr->Num, st_arr->Num);
@@ -125,7 +127,7 @@ void hook_policy_on_level_change(void) {
  * is still in a level transition.
  */
 void hook_policy_update_bans(void) {
-  if (repopulate_bans_pending && !is_server_busy()) {
+  if (repopulate_bans_pending && !hook_engine_is_server_busy()) {
     repopulate_bans_pending = 0;
     repopulate_bans();
   }

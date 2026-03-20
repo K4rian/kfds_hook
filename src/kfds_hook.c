@@ -46,6 +46,8 @@ __attribute__((constructor)) static void hook_attach(void) {
     return;
   }
 
+  // Security patch first: modifies the binary's integrity check before
+  // the trampoline installs
   if (g_config.security_patch)
     hook_security_patch();
 
