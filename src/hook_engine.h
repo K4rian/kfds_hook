@@ -199,13 +199,21 @@
 /*
  * KFGameType (Invasion)
  *   +0x03bc  GameDifficulty     float
+ *   +0x0494  MaxSpectators      int
+ *   +0x0498  NumSpectators      int
  *   +0x049c  MaxPlayers         int
+ *   +0x04a0  NumPlayers         int
+ *   +0x1060  FriendlyFireScale  float
  *   +0x1568  bTradingDoorsOpen  bool (1=trader, 0=wave)
  *   +0x1578  WaveCountDown      int  (countdown seconds)
  *   +0x157c  bWaveInProgress    bool (0=trader, 1=wave)
  */
 #define GAMETYPE_OFFSET_GameDifficulty    0x03bc
+#define GAMETYPE_OFFSET_MaxSpectators     0x0494
+#define GAMETYPE_OFFSET_NumSpectators     0x0498
 #define GAMETYPE_OFFSET_MaxPlayers        0x049c
+#define GAMETYPE_OFFSET_NumPlayers        0x04a0
+#define GAMETYPE_OFFSET_FriendlyFireScale 0x1060
 #define GAMETYPE_OFFSET_bTradingDoorsOpen 0x1568
 #define GAMETYPE_OFFSET_WaveCountDown     0x1578
 #define GAMETYPE_OFFSET_bWaveInProgress   0x157c

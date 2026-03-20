@@ -366,7 +366,10 @@ static void cmd_exec(cmd_ctx_t *ctx) {
 // SERVER INFO
 // ============================================================================
 static void cmd_get_server_info(cmd_ctx_t *ctx) {
-  (void)ctx;
+  if (!ctx->game_info) {
+    hook_socket_finish_err("GameInfo not found");
+    return;
+  }
 
   void *gri = hook_engine_get_gri();
   if (!gri) {
@@ -379,6 +382,7 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":{");
 
+  // --------------------
   // String fields
   static const struct {
     const char *key;
@@ -406,30 +410,43 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
     }
   }
 
+  // --------------------
   // Int field
-  jb_raw(&jb, ",");
-  jb_str(&jb, "server_region");
-  jb_raw(&jb, ":");
+  jb_raw(&jb, ",\"server_region\":");
   jb_int(&jb, *(int *)((uint8_t *)gri + GRI_OFFSET_ServerRegion));
+  jb_raw(&jb, ",\"max_spectators\":");
+  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxSpectators));
+  jb_raw(&jb, ",\"num_spectators\":");
+  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_NumSpectators));
+  jb_raw(&jb, ",\"max_players\":");
+  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxPlayers));
+  jb_raw(&jb, ",\"num_players\":");
+  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_NumPlayers));
 
+  // --------------------
   // Byte fields
   jb_raw(&jb, ",\"base_difficulty\":");
   jb_int(&jb, *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_BaseDifficulty));
   jb_raw(&jb, ",\"final_wave\":");
   jb_int(&jb, *(uint8_t *)((uint8_t *)gri + GRI_OFFSET_FinalWave));
 
+  // --------------------
   // Float fields
   jb_raw(&jb, ",\"game_diff\":");
   float gd;
   memcpy(&gd, gri + GRI_OFFSET_GameDiff, sizeof(gd));
-  char fbuf[32];
-  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
-  jb_raw(&jb, fbuf);
+  jb_float(&jb, gd);
 
   jb_raw(&jb, ",\"max_tick_rate\":");
   float rate = UGameEngine_GetMaxTickRate((void *)hook_engine_get());
   jb_float(&jb, rate);
-  jb_raw(&jb, "}");
+
+  jb_raw(&jb, ",\"friendly_fire_scale\":");
+  float ffs;
+  memcpy(&ffs, ctx->game_info + GAMETYPE_OFFSET_FriendlyFireScale, sizeof(ffs));
+  jb_float(&jb, ffs);
+
+  // --------------------
 
   jb_raw(&jb, "}}");
 
@@ -474,6 +491,7 @@ static void cmd_get_level_url(cmd_ctx_t *ctx) {
   jb_raw(&jb, ",\"valid\":");
   jb_bool(&jb, *(int *)((uint8_t *)level + FURL_OFFSET_Valid));
 
+  // --------------------
   // Options
   TArrayFString *op_array =
       (TArrayFString *)((uint8_t *)level + FURL_OFFSET_Op);
@@ -495,7 +513,7 @@ static void cmd_get_level_url(cmd_ctx_t *ctx) {
     }
   }
   jb_raw(&jb, "]");
-  //
+  // --------------------
 
   jb_raw(&jb, "}}");
 
@@ -518,7 +536,7 @@ static void cmd_get_wave_state(cmd_ctx_t *ctx) {
   uint8_t *base = (uint8_t *)gri;
 
   // WaveNumber: 0-indexed in engine (wave 1 = 0, wave 4 = 3)
-  // bWaveInProgress at +0x5fc: 1=wave active, 0=trader/lobby
+  // bWaveInProgress: 1=wave active, 0=trader/lobby
   json_buf_t jb;
   jb_init(&jb);
   jb_raw(&jb, "{\"ok\":true,\"d\":{");
@@ -538,9 +556,7 @@ static void cmd_get_wave_state(cmd_ctx_t *ctx) {
 
   float gd;
   memcpy(&gd, base + GRI_OFFSET_GameDiff, sizeof(gd));
-  char fbuf[32];
-  snprintf(fbuf, sizeof(fbuf), "%.6g", gd);
-  jb_raw(&jb, fbuf);
+  jb_float(&jb, gd);
 
   jb_raw(&jb, ",\"game_started\":");
   jb_bool(&jb, hook_engine_is_game_started());
@@ -727,8 +743,7 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
       const ucs2_t *vname = UObject_GetName(vet_class);
       if (vname) {
         // Check for "KFVet" prefix and strip if present
-        int strip = (vname[0] == 'K' && vname[1] == 'F' && vname[2] == 'V' &&
-                     vname[3] == 'e' && vname[4] == 't');
+        int strip = (ucs2_starts_with_ascii(vname, "KFVet"));
         const ucs2_t *src = strip ? vname + 5 : vname;
         int j = 0;
         while (src[j] && j < 63) {
@@ -822,8 +837,7 @@ static void cmd_kick(cmd_ctx_t *ctx) {
     if (!objname)
       continue;
     // Skip UTServerAdminSpectator
-    if (objname[0] == 'U' && objname[1] == 'T' && objname[2] == 'S' &&
-        objname[3] == 'e')
+    if (ucs2_starts_with_ascii(objname, "UTServer"))
       continue;
 
     void *netconn =
@@ -2351,7 +2365,7 @@ static const cmd_entry_t cmd_table[] = {
     {"setliveserverregion", cmd_set_live_server_region, 1},
     {"setlivemotd", cmd_set_live_motd, 1},
     {"setlivegamedifficulty", cmd_set_live_game_difficulty, 1},
-    {"setlivemaxplayer", cmd_set_live_max_players, 1},
+    {"setlivemaxplayers", cmd_set_live_max_players, 1},
     {"setlivegamepassword", cmd_set_live_game_password, 1},
     // CONFIG
     {"cfggetstr", cmd_cfg_get_str, 1},

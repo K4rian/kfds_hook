@@ -296,10 +296,11 @@ static void *hook_engine_find_level_actor(const char *actor_name) {
 }
 
 /*
- * Find the GRI actor by scanning for an object whose name starts with "GameRep".
+ * Find the GRI actor by scanning for an object whose name starts
+ * with "KFGameRep". Confirmed name: KFGameReplicationInfo.
  */
 void *hook_engine_get_gri(void) {
-  return hook_engine_find_level_actor("GameRep");
+  return hook_engine_find_level_actor("KFGameRep");
 }
 
 /*

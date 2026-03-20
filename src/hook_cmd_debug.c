@@ -19,8 +19,8 @@
 // DEBUG COMMAND HELPERS
 // ============================================================================
 /*
- * Write a hex+ASCII dump of [scan_size] bytes from [ptr] to [f]
- * label is printed as a section header
+ * Write a hex+ASCII dump of [scan_size] bytes from [ptr] to [f].
+ * label is printed as a section header.
  */
 static void hexdump_to(FILE *f, const char *label, void *ptr, int scan_size) {
   uint8_t *base = (uint8_t *)ptr;
@@ -61,14 +61,14 @@ static void hexdump_to(FILE *f, const char *label, void *ptr, int scan_size) {
 }
 
 /*
- * Open a log file for a debug dump command
+ * Open a log file for a debug dump command.
  *
  * If override_path is non-NULL and non-empty, it is used as the full file
  * path directly. Otherwise, g_config.debug_dump_dir is created if
  * needed and a timestamped filename is generated:
  *   <g_config.debug_dump_dir>/<timestamp_ms>_<cmd_name>.log
  *
- * Returns FILE* on success, NULL on failure
+ * Returns FILE* on success, NULL on failure.
  */
 static FILE *dump_open(const char *cmd_name, const char *override_path,
                        char *path_out, size_t path_len) {
@@ -117,7 +117,46 @@ static FILE *dump_open(const char *cmd_name, const char *override_path,
 // DEBUG COMMANDS
 // ============================================================================
 /*
- * Dumps the GameReplicationInfo (GRI) memory layout.
+ * Dumps the GameInfo (GameType) memory layout to a file.
+ */
+void cmd_debug_gameinfo_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  char path[512];
+  FILE *f = dump_open("GameInfoDump",
+                      g_socket_slot.req.argc > 0 && g_socket_slot.req.args[0][0]
+                          ? g_socket_slot.req.args[0]
+                          : NULL,
+                      path, sizeof(path));
+  if (!f) {
+    hook_socket_finish_err("failed to open dump file");
+    return;
+  }
+
+  if (!ctx->game_info) {
+    fclose(f);
+    hook_socket_finish_err("GameInfo not found");
+    return;
+  }
+
+  char label[64];
+  snprintf(label, sizeof(label), "GameInfo=%p +0x000..+0x17ff", ctx->game_info);
+  hexdump_to(f, label, (uint8_t *)ctx->game_info, +0x1800);
+
+  fclose(f);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_str(&jb, path);
+  jb_raw(&jb, "}");
+
+  hook_log_debug("DebugGameInfoDump: dump saved to %s\n", path);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Dumps the GameReplicationInfo (GRI) memory layout to a file.
  */
 void cmd_debug_gri_dump(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -157,7 +196,7 @@ void cmd_debug_gri_dump(cmd_ctx_t *ctx) {
 }
 
 /*
- * Dumps the PlayerReplicationInfo (PRI) memory layout.
+ * Dumps the PlayerReplicationInfo (PRI) memory layout to a file.
  */
 void cmd_debug_pri_dump(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -223,7 +262,7 @@ void cmd_debug_pri_dump(cmd_ctx_t *ctx) {
 }
 
 /*
- * Dumps every non-null actor in the level actor list.
+ * Dumps every non-null actor in the level actor list to a file.
  * Output per actor: index, pointer, and full UObject name.
  */
 void cmd_debug_actors_dump(cmd_ctx_t *ctx) {
@@ -282,7 +321,7 @@ void cmd_debug_actors_dump(cmd_ctx_t *ctx) {
 }
 
 /*
- * Dumps every connected PlayerController, PC+0x000..+0x5ff.
+ * Dumps every connected PlayerController to a file.
  * Used to locate the Pawn* pointer on the PC object.
  */
 void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
@@ -318,7 +357,7 @@ void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
     void *netconn =
         *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
     if (!netconn)
-      continue; /* skip non-human PCs (WebAdmin, bots) */
+      continue; // skip non-human PCs (WebAdmin, bots)
 
     const ucs2_t *name = UObject_GetName(actor);
     char name_buf[64] = "(unknown)";
@@ -354,7 +393,7 @@ void cmd_debug_pc_dump(cmd_ctx_t *ctx) {
 }
 
 /*
- * Dumps every human player's Pawn object.
+ * Dumps every human player's Pawn object to a file.
  * Follows PC+0x360 (APLAYERCONTROLLER_OFFSET_PAWN) to reach the Pawn actor.
  * Skips players with NULL Pawn (dead/spectating).
  */
@@ -436,7 +475,8 @@ void cmd_debug_pcpawn_dump(cmd_ctx_t *ctx) {
 }
 
 /*
- * Dumps every PlayerController network connection (excluding WebAdmin).
+ * Dumps every PlayerController network connection (excluding WebAdmin) 
+ * to a file.
  */
 void cmd_debug_pcnetconn_dump(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -582,6 +622,7 @@ void cmd_debug_cfg_empty_section(cmd_ctx_t *ctx) {
 // DEBUG COMMAND DISPATCHER
 // ============================================================================
 static const cmd_entry_t debug_cmd_table[] = {
+    {"debuggameinfodump", cmd_debug_gameinfo_dump, 1},
     {"debuggridump", cmd_debug_gri_dump, 1},
     {"debugpridump", cmd_debug_pri_dump, 1},
     {"debugactorsdump", cmd_debug_actors_dump, 1},
