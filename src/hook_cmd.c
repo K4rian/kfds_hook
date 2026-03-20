@@ -91,6 +91,48 @@ static void fstring_write(FString *fstr, const ucs2_t *new_val, int new_num,
 }
 
 /*
+ * Writes an integer value to a GameType int field at the given offset.
+ */
+static void gametype_set_int(cmd_ctx_t *ctx, int offset, int new_val, const char *label) {
+  uint8_t *ptr = (uint8_t *)ctx->game_info + offset;
+  int old_val;
+  memcpy(&old_val, ptr, sizeof(old_val));
+  memcpy(ptr, &new_val, sizeof(new_val));
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"old\":");
+  jb_int(&jb, old_val);
+  jb_raw(&jb, ",\"new\":");
+  jb_int(&jb, new_val);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("%s: %d -> %d\n", label, old_val, new_val);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Writes a float value to a GameType float field at the given offset.
+ */
+static void gametype_set_float(cmd_ctx_t *ctx, int offset, float new_val, const char *label) {
+  uint8_t *ptr = (uint8_t *)ctx->game_info + offset;
+  float old_val;
+  memcpy(&old_val, ptr, sizeof(old_val));
+  memcpy(ptr, &new_val, sizeof(new_val));
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"old\":");
+  jb_float(&jb, old_val);
+  jb_raw(&jb, ",\"new\":");
+  jb_float(&jb, new_val);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("%s: %g -> %g\n", label, old_val, new_val);
+  hook_socket_finish_json(&jb);
+}
+
+/*
  * Writes a string value to a GRI FString field at the given offset.
  * Returns 1 on success, 0 if GRI is not found (response already set).
  */
@@ -1762,6 +1804,27 @@ static void cmd_set_live_game_difficulty(cmd_ctx_t *ctx) {
 }
 
 /*
+ * Sets the maximum number of spectators allowed on the server.
+ * Effect is immediate.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_max_spectators(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: MaxSpectators");
+    return;
+  }
+
+  // Same rule as max players
+  int new_max = (int)strtol(g_socket_slot.req.args[0], NULL, 10);
+  if (new_max < 1 || new_max > 32) {
+    hook_socket_finish_err("MaxSpectators must be between 1 and 32");
+    return;
+  }
+
+  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxSpectators, new_max, "SetLiveMaxSpectators");
+}
+
+/*
  * Sets the maximum number of players allowed on the server.
  * Effect is immediate: the engine checks MaxPlayers on each new connection
  * attempt, so new joins are capped at the updated value right away.
@@ -1781,21 +1844,7 @@ static void cmd_set_live_max_players(cmd_ctx_t *ctx) {
     return;
   }
 
-  uint8_t *ptr = (uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxPlayers;
-  int old_max;
-  memcpy(&old_max, ptr, sizeof(old_max));
-  memcpy(ptr, &new_max, sizeof(new_max));
-
-  json_buf_t jb;
-  jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":{\"old\":");
-  jb_int(&jb, old_max);
-  jb_raw(&jb, ",\"new\":");
-  jb_int(&jb, new_max);
-  jb_raw(&jb, "}}");
-
-  hook_log_debug("SetLiveMaxPlayers: %d -> %d\n", old_max, new_max);
-  hook_socket_finish_json(&jb);
+  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxPlayers, new_max, "SetLiveMaxPlayers");
 }
 
 /*
@@ -1829,6 +1878,26 @@ static void cmd_set_live_game_password(cmd_ctx_t *ctx) {
   fstring_write(fs, new_val, new_num, "SetLiveGamePassword");
 
   hook_socket_finish_ok();
+}
+
+/*
+ * Sets the friendly fire scale.
+ * Effect is immediate.
+ * Change is lost on map change.
+ */
+static void cmd_set_live_friendly_fire_scale(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: FriendlyFireScale");
+    return;
+  }
+
+  float new_scale = strtof(g_socket_slot.req.args[0], NULL);
+  if (new_scale < 0.0 || new_scale > 10.0) {
+    hook_socket_finish_err("FriendlyFireScale must be between 0.0 and 10.0");
+    return;
+  }
+
+  gametype_set_float(ctx, GAMETYPE_OFFSET_FriendlyFireScale, new_scale, "SetLiveFriendlyFireScale");
 }
 
 // ============================================================================
@@ -2365,8 +2434,10 @@ static const cmd_entry_t cmd_table[] = {
     {"setliveserverregion", cmd_set_live_server_region, 1},
     {"setlivemotd", cmd_set_live_motd, 1},
     {"setlivegamedifficulty", cmd_set_live_game_difficulty, 1},
+    {"setlivemaxspectators", cmd_set_live_max_spectators, 1},
     {"setlivemaxplayers", cmd_set_live_max_players, 1},
     {"setlivegamepassword", cmd_set_live_game_password, 1},
+    {"setlivefriendlyfirescale", cmd_set_live_friendly_fire_scale, 1},
     // CONFIG
     {"cfggetstr", cmd_cfg_get_str, 1},
     {"cfggetint", cmd_cfg_get_int, 1},
