@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "hook_cmd.h"
 #include "hook_engine.h"
@@ -19,9 +20,25 @@
 // ============================================================================
 // COMMAND DEFINES
 // ============================================================================
-#define CFG_BUF_CHARS        1024 // max config value / section / key (UTF-8)
-#define CFG_DEL_SEC_BUF      (CFG_BUF_CHARS * 4)
-#define CFG_DEL_MAX_ENTRIES  512
+#define CFG_BUF_CHARS 1024 // max config value / section / key (UTF-8)
+#define CFG_DEL_SEC_BUF (CFG_BUF_CHARS * 4)
+#define CFG_DEL_MAX_ENTRIES 512
+
+// ============================================================================
+// COMMAND TYPES
+// ============================================================================
+typedef struct {
+  char name[64];
+  char ip[64];
+  uint64_t steamid;
+  void *pc;
+} pc_actor_info_t;
+
+typedef enum {
+  PC_FIND_BY_STEAMID = 0,
+  PC_FIND_BY_IP = 1,
+  PC_FIND_BY_NAME = 2,
+} pc_find_mode_t;
 
 // ============================================================================
 // COMMAND STATIC STATE
@@ -93,7 +110,8 @@ static void fstring_write(FString *fstr, const ucs2_t *new_val, int new_num,
 /*
  * Writes an integer value to a GameType int field at the given offset.
  */
-static void gametype_set_int(cmd_ctx_t *ctx, int offset, int new_val, const char *label) {
+static void gametype_set_int(cmd_ctx_t *ctx, int offset, int new_val,
+                             const char *label) {
   uint8_t *ptr = (uint8_t *)ctx->game_info + offset;
   int old_val;
   memcpy(&old_val, ptr, sizeof(old_val));
@@ -114,7 +132,8 @@ static void gametype_set_int(cmd_ctx_t *ctx, int offset, int new_val, const char
 /*
  * Writes a float value to a GameType float field at the given offset.
  */
-static void gametype_set_float(cmd_ctx_t *ctx, int offset, float new_val, const char *label) {
+static void gametype_set_float(cmd_ctx_t *ctx, int offset, float new_val,
+                               const char *label) {
   uint8_t *ptr = (uint8_t *)ctx->game_info + offset;
   float old_val;
   memcpy(&old_val, ptr, sizeof(old_val));
@@ -177,13 +196,13 @@ static int gri_set_int(int offset, const char *value, const char *label) {
 /*
  * Helper shared by several config destructive functions.
  * Performs the GetSection->filter->EmptySection->reinject->Flush entirely in C.
- * section,
- * key,
- * file:     UCS-2 strings (file may be NULL for GConfig default)
- * value:    UCS-2 value to match exactly (case-sensitive)
- *           NULL = key-only mode: delete all entries whose key matches
- * max_del:  0 = delete all matches, N = delete at most N occurrences
- * Returns:  number of entries deleted or 0 if no matches.
+ * section: UCS-2 section name
+ * key:     UCS-2 key name
+ * file:    UCS-2 file name (may be NULL for GConfig default)
+ * value:   UCS-2 value to match exactly (case-sensitive)
+ *          NULL = key-only mode: delete all entries whose key matches
+ * max_del: 0 = delete all matches, N = delete at most N occurrences
+ * Returns: number of entries deleted, 0 if no matches
  */
 static int cfg_delete_entries(void *gcfg, const ucs2_t *section,
                               const ucs2_t *key, const ucs2_t *value,
@@ -283,21 +302,6 @@ static void tarray_fstring_remove(TArrayFString *arr, int i) {
 }
 
 /*
- * Extracts the SteamID64 prefix from a "<steamid64> <name>" entry.
- * Copies everything before the first space into dst, or the full string
- * if no space is found. Always NUL-terminates. dst_size must be > 0.
- */
-static void extract_steamid_prefix(const char *src, char *dst,
-                                   size_t dst_size) {
-  const char *sp = strchr(src, ' ');
-  size_t len = sp ? (size_t)(sp - src) : strlen(src);
-  if (len >= dst_size)
-    len = dst_size - 1;
-  memcpy(dst, src, len);
-  dst[len] = '\0';
-}
-
-/*
  * Broadcasts a message to all players via AGameInfo::eventBroadcast.
  * fname_index controls chat channel styling.
  */
@@ -366,25 +370,252 @@ static void cfg_parse_sf(ucs2_t *sec, ucs2_t *file, ucs2_t **fp, int file_idx) {
   }
 }
 
+/*
+ * Extracts the SteamID64 prefix from a "<steamid64> <name>" entry.
+ * Copies everything before the first space into dst, or the full string
+ * if no space is found. Always NUL-terminates. dst_size must be > 0.
+ */
+static void extract_steamid_prefix(const char *src, char *dst,
+                                   size_t dst_size) {
+  const char *sp = strchr(src, ' ');
+  size_t len = sp ? (size_t)(sp - src) : strlen(src);
+  if (len >= dst_size)
+    len = dst_size - 1;
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+}
+
+/*
+ * Scans the actor list for all PlayerControllers matching mode and target.
+ * Always populates all fields (name, ip, steamid, pc) for each match.
+ * Returns the number of matches found, 0 if none.
+ * Skips UTServerAdminSpectator (WebAdmin).
+ */
+static int player_get_info(pc_find_mode_t mode, const char *target,
+                           pc_actor_info_t *out_info, int max_results) {
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
+    return 0;
+
+  int found = 0;
+  for (int i = 0; i < actor_count && found < max_results; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+
+    void *pc = Cast_APlayerController(actor);
+    if (!pc)
+      continue;
+
+    const ucs2_t *objname = UObject_GetName(pc);
+    if (!objname || ucs2_starts_with_ascii(objname, "UTServer"))
+      continue;
+
+    void *netconn =
+        *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_NetConn);
+    if (!netconn)
+      continue;
+
+    // Extract steamid
+    uint64_t steamid =
+        *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
+    if (steamid == 0)
+      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
+
+    // Extract name
+    char name[64] = {0};
+    void *pri = *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_PRI);
+    if (pri) {
+      FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
+      if (name_fs->Data && name_fs->Num > 0)
+        ucs2_to_utf8(name_fs->Data, name, sizeof(name));
+    }
+    if (name[0] == '\0')
+      strncpy(name, "Player", sizeof(name) - 1);
+
+    // Extract IP
+    char ip[64] = {0};
+    FString *ip_fs = (FString *)((uint8_t *)netconn + UNETCONN_OFFSET_IP);
+    if (ip_fs->Data && ip_fs->Num > 0)
+      ucs2_to_utf8(ip_fs->Data, ip, sizeof(ip));
+
+    // Match against target
+    int match = 0;
+    switch (mode) {
+    case PC_FIND_BY_STEAMID: {
+      uint64_t t = (uint64_t)strtoull(target, NULL, 10);
+      match = (steamid != 0 && steamid == t);
+      break;
+    }
+    case PC_FIND_BY_IP:
+      match = (ip[0] != '\0' && strcmp(ip, target) == 0);
+      break;
+    case PC_FIND_BY_NAME:
+      match = (name[0] != '\0' && strcmp(name, target) == 0);
+      break;
+    }
+
+    if (!match)
+      continue;
+
+    // Populate result
+    pc_actor_info_t *info = &out_info[found++];
+    strncpy(info->name, name, sizeof(info->name) - 1);
+    strncpy(info->ip, ip, sizeof(info->ip) - 1);
+    info->steamid = steamid;
+    info->pc = pc;
+  }
+
+  return found;
+}
+
+/*
+ * Adds an IP ban to the live IPPolicies TArray, session list, and GConfig.
+ * ip must be a plain IP string (e.g. "1.2.3.4"), not prefixed.
+ * Returns 1 on success, 0 on failure (response already set).
+ */
+static int policy_ban_ip(void *ac, const char *ip) {
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
+
+  if (!arr->Data || arr->Num >= arr->Max) {
+    hook_socket_finish_err("IPPolicies TArray full or uninitialized");
+    return 0;
+  }
+
+  if (strlen(ip) > 45) {
+    hook_socket_finish_err("IP too long");
+    return 0;
+  }
+
+  static const char prefix[] = "DENY;";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  const size_t ip_len = strlen(ip);
+  const size_t copy_len =
+      ip_len < (64 - prefix_len - 1) ? ip_len : (64 - prefix_len - 1);
+  char policy_utf8[64];
+  memcpy(policy_utf8, prefix, prefix_len);
+  memcpy(policy_utf8 + prefix_len, ip, copy_len);
+  policy_utf8[prefix_len + copy_len] = '\0';
+
+  ucs2_t policy_ucs2[64] = {0};
+  utf8_to_ucs2(policy_utf8, policy_ucs2, 64);
+
+  FString_ctor(&arr->Data[arr->Num], policy_ucs2);
+  arr->Num++;
+
+  hook_policy_add_session_ip_ban(policy_utf8);
+
+  void *gcfg = hook_engine_get_gconfig();
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, policy_ucs2, BAN_FILE, 0);
+  GConfig_Flush(gcfg, 1, BAN_FILE);
+
+  hook_log_debug("policy_ban_ip: banned %s\n", policy_utf8);
+  return 1;
+}
+
+/*
+ * Adds a Steam ban to the live BannedIDs TArray, session list, and GConfig.
+ * Returns 1 on success, 0 on failure (response already set).
+ */
+static int policy_ban_steamid(void *ac, const char *steamid, const char *name) {
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+
+  if (!arr->Data || arr->Max == 0) {
+    arr->Data =
+        (FString *)calloc(POLICY_BANNEDIDS_INITIAL_MAX, sizeof(FString));
+    if (!arr->Data) {
+      hook_socket_finish_err("BannedIDs TArray alloc failed");
+      return 0;
+    }
+    arr->Num = 0;
+    arr->Max = POLICY_BANNEDIDS_INITIAL_MAX;
+  }
+
+  if (arr->Num >= arr->Max) {
+    hook_socket_finish_err("BannedIDs TArray full");
+    return 0;
+  }
+
+  char id_buf[32] = {0};
+  char name_buf[64] = {0};
+  strncpy(id_buf, steamid, sizeof(id_buf) - 1);
+  strncpy(name_buf, name && name[0] ? name : "HookBan", sizeof(name_buf) - 1);
+
+  char entry_utf8[ARG_MAX_CHARS];
+  snprintf(entry_utf8, sizeof(entry_utf8), "%s %s", id_buf, name_buf);
+
+  ucs2_t entry_ucs2[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(entry_utf8, entry_ucs2, ARG_MAX_CHARS);
+
+  FString_ctor(&arr->Data[arr->Num], entry_ucs2);
+  arr->Num++;
+
+  hook_policy_add_session_steam_ban(entry_utf8);
+
+  void *gcfg = hook_engine_get_gconfig();
+  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, entry_ucs2, BAN_FILE, 0);
+  GConfig_Flush(gcfg, 1, BAN_FILE);
+
+  hook_log_debug("policy_ban_steamid: banned %s\n", entry_utf8);
+  return 1;
+}
+
+/*
+ * Sends a "multiple matches" error response with the list of affected players.
+ * Called when a command finds multiple actors matching the target and
+ * force=1 was not set.
+ */
+static void policy_send_conflict_response(pc_actor_info_t *info, int count) {
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":false,\"e\":\"multiple matches\",\"d\":[");
+  for (int i = 0; i < count; i++) {
+    if (i > 0)
+      jb_raw(&jb, ",");
+    jb_raw(&jb, "{\"name\":");
+    jb_str(&jb, info[i].name);
+    jb_raw(&jb, ",\"steamid\":");
+    jb_uint64_str(&jb, info[i].steamid);
+    jb_raw(&jb, ",\"ip\":");
+    jb_str(&jb, info[i].ip);
+    jb_raw(&jb, "}");
+  }
+  jb_raw(&jb, "]}");
+  hook_socket_finish_json(&jb);
+}
+
 // ============================================================================
 // PING
 // ============================================================================
+/*
+ * Returns the current hook revision.
+ * Used to verify the hook is alive and responding.
+ */
 static void cmd_ping(cmd_ctx_t *ctx) {
   (void)ctx;
 
   json_buf_t jb;
   jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_raw(&jb, "{\"ok\":true,\"d\":{");
+  jb_raw(&jb, "\"rev\":");
   jb_str(&jb, HOOK_REVISION);
-  jb_raw(&jb, "}");
+  jb_raw(&jb, "}}");
 
-  hook_log_debug("Ping: Pong\n");
+  hook_log_debug("Ping: Rev%s\n", HOOK_REVISION);
   hook_socket_finish_json(&jb);
 }
 
 // ============================================================================
 // CONSOLE
 // ============================================================================
+/*
+ * Executes an arbitrary console command via UGameEngine::Exec.
+ * Effect depends entirely on the command passed.
+ * Args: Command [Args...]
+ */
 static void cmd_exec(cmd_ctx_t *ctx) {
   (void)ctx;
 
@@ -405,8 +636,74 @@ static void cmd_exec(cmd_ctx_t *ctx) {
 }
 
 // ============================================================================
+// MAP CHANGE (TRAVEL)
+// ============================================================================
+/*
+ * Initiates a server map change via ALevelInfo::eventServerTravel.
+ * Accepts arbitrary URL parameters (e.g. KF-Manor?MaxPlayers=6).
+ * The change is asynchronous, the server travels on the next tick.
+ * Args: MapURL
+ */
+static void cmd_server_travel(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: MapURL");
+    return;
+  }
+
+  ucs2_t buf[ARG_MAX_CHARS];
+  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
+
+  FString url;
+  FString_ctor(&url, buf);
+  ALevelInfo_eventServerTravel(ctx->level_info, &url, 0);
+  FString_dtor(&url);
+
+  hook_log_debug("ServerTravel: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
+// ADMIN SERVER MESSAGE
+// ============================================================================
+/*
+ * Sends a chat message to all connected players via AGameInfo::eventBroadcast.
+ * Displayed as a standard chat line with the server name as sender.
+ * Args: Message
+ */
+static void cmd_say(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Message");
+    return;
+  }
+  broadcast_msg(ctx, FNAME_ServerSay);
+
+  hook_log_debug("Say: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+/*
+ * Sends a full-screen announcement to all connected players.
+ * Displayed in large font at the bottom-center of the screen.
+ * Uses CriticalEvent channel.
+ * Args: Message
+ */
+static void cmd_announce(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Message");
+    return;
+  }
+  broadcast_msg(ctx, FNAME_CriticalEvent);
+
+  hook_log_debug("Announce: %s\n", g_socket_slot.req.args[0]);
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
 // SERVER INFO
 // ============================================================================
+/*
+ * Returns a snapshot of the server state from GRI and GameType.
+ */
 static void cmd_get_server_info(cmd_ctx_t *ctx) {
   if (!ctx->game_info) {
     hook_socket_finish_err("GameInfo not found");
@@ -457,9 +754,11 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
   jb_raw(&jb, ",\"server_region\":");
   jb_int(&jb, *(int *)((uint8_t *)gri + GRI_OFFSET_ServerRegion));
   jb_raw(&jb, ",\"max_spectators\":");
-  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxSpectators));
+  jb_int(&jb,
+         *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxSpectators));
   jb_raw(&jb, ",\"num_spectators\":");
-  jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_NumSpectators));
+  jb_int(&jb,
+         *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_NumSpectators));
   jb_raw(&jb, ",\"max_players\":");
   jb_int(&jb, *(int *)((uint8_t *)ctx->game_info + GAMETYPE_OFFSET_MaxPlayers));
   jb_raw(&jb, ",\"num_players\":");
@@ -496,6 +795,10 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
   hook_socket_finish_json(&jb);
 }
 
+/*
+ * Returns the current level's FURL (Unreal resource locator) with options.
+ * Options are dynamic and returned as an array with the format "K=V".
+ */
 static void cmd_get_level_url(cmd_ctx_t *ctx) {
   (void)ctx;
 
@@ -566,6 +869,9 @@ static void cmd_get_level_url(cmd_ctx_t *ctx) {
 // ============================================================================
 // WAVE STATE
 // ============================================================================
+/*
+ * Returns the current wave state from GRI and GameType.
+ */
 static void cmd_get_wave_state(cmd_ctx_t *ctx) {
   (void)ctx;
 
@@ -609,52 +915,6 @@ static void cmd_get_wave_state(cmd_ctx_t *ctx) {
 }
 
 // ============================================================================
-// MAP CHANGE (TRAVEL)
-// ============================================================================
-static void cmd_server_travel(cmd_ctx_t *ctx) {
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: MapURL");
-    return;
-  }
-
-  ucs2_t buf[ARG_MAX_CHARS];
-  arg_to_ucs2(0, buf, ARG_MAX_CHARS);
-
-  FString url;
-  FString_ctor(&url, buf);
-  ALevelInfo_eventServerTravel(ctx->level_info, &url, 0);
-  FString_dtor(&url);
-
-  hook_log_debug("ServerTravel: %s\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-// ============================================================================
-// ADMIN SERVER MESSAGE
-// ============================================================================
-static void cmd_say(cmd_ctx_t *ctx) {
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: Message");
-    return;
-  }
-  broadcast_msg(ctx, FNAME_ServerSay);
-
-  hook_log_debug("Say: %s\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-static void cmd_announce(cmd_ctx_t *ctx) {
-  if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: Message");
-    return;
-  }
-  broadcast_msg(ctx, FNAME_CriticalEvent);
-
-  hook_log_debug("Announce: %s\n", g_socket_slot.req.args[0]);
-  hook_socket_finish_ok();
-}
-
-// ============================================================================
 // SKIP TRADER
 // ============================================================================
 /*
@@ -694,18 +954,19 @@ static void cmd_skip_trader(cmd_ctx_t *ctx) {
 // ============================================================================
 /*
  * Returns all connected players.
- * Traversal: actor list -> is_player_controller -> PC -> PRI (for stats)
- *                                               -> PC -> NetConn (for network)
- *                                               -> PC -> Pawn (for hp/armor)
+ * Traversal: actor list -> PC -> PRI (for stats)
+ *                       -> PC -> NetConn (for network)
+ *                       -> PC -> Pawn (for hp/armor)
  * PRI.Owner points to GRI, NOT to the owning PC, cannot traverse PRI->PC.
  * WebAdmin (UTServerAdminSpectator) actor skipped.
- * Ping: uint8 at PRI+0x3c0, displayed ms=raw*4 (TBC).
- * Dosh: float32.
- * Health: int at Pawn+0x480. -1 if Pawn is NULL (player dead/spectating).
- * Armor: float at Pawn+0x774, cast to int. -1 if Pawn is NULL.
- * Perk: UClass* at PRI+0x5f4, name via UObject_GetName,
- *       "KFVet" prefix stripped, null if pointer is NULL.
- * Perk Level: int at PRI+0x5f8, 1-indexed (1-6).
+ * Ping:      uint8 at PRI+0x3c0, displayed ms=raw*4.
+ * Dosh:      float32 at PRI+0x3b4, a.k.a. Score.
+ * Health:    int at Pawn+0x480. -1 if Pawn is NULL (player dead/spectating).
+ * Armor:     float at Pawn+0x774, cast to int. -1 if Pawn is NULL.
+ * Perk:      UClass* at PRI+0x5f4, name via UObject_GetName,
+ *           "KFVet" prefix stripped, null if pointer is NULL.
+ * Perk Lv.: int at PRI+0x5f8, 1-indexed (1-6).
+ * TODO: Assists
  */
 static void cmd_get_players(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -843,8 +1104,6 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
 
 /*
  * Kicks a player by SteamID64.
- * Uses Cast_APlayerController to confirm each actor is a PC.
- * Skips UTServerAdminSpectator (WebAdmin).
  */
 static void cmd_kick(cmd_ctx_t *ctx) {
   if (g_socket_slot.req.argc < 1) {
@@ -852,72 +1111,26 @@ static void cmd_kick(cmd_ctx_t *ctx) {
     return;
   }
 
-  uint64_t target = (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
-  if (target == 0) {
+  uint64_t target_steamid =
+      (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
+  if (target_steamid == 0) {
     hook_socket_finish_err("invalid SteamID64");
     return;
   }
 
-  void **actors = NULL;
-  int actor_count = 0;
-  if (!hook_engine_get_level_actors(&actors, &actor_count))
-    return;
-
-  int kicked = 0;
-  uint64_t steamid = 0;
-  char player_name[ARG_MAX_CHARS] = {0};
-  for (int i = 0; i < actor_count && !kicked; i++) {
-    void *actor = actors[i];
-    if (!actor)
-      continue;
-
-    void *pc = Cast_APlayerController(actor);
-    if (!pc)
-      continue;
-
-    const ucs2_t *objname = UObject_GetName(pc);
-    if (!objname)
-      continue;
-    // Skip UTServerAdminSpectator
-    if (ucs2_starts_with_ascii(objname, "UTServer"))
-      continue;
-
-    void *netconn =
-        *(void **)((uint8_t *)pc + APLAYERCONTROLLER_OFFSET_NetConn);
-    if (!netconn)
-      continue;
-
-    steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
-    if (steamid == 0)
-      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
-    if (steamid != target)
-      continue;
-
-    hook_log_debug("Kick: matched pc=%p steamid=%" PRIu64 " target=%" PRIu64
-                   "\n",
-                   pc, steamid, target);
-
-    // Get the player's name
-    void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
-    if (pri) {
-      FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
-      if (name_fs->Data && name_fs->Num > 0)
-        ucs2_to_utf8(name_fs->Data, player_name, sizeof(player_name));
-    }
-    AGameInfo_eventKickIdler(ctx->game_info, pc);
-    kicked = 1;
-  }
-
-  if (kicked) {
-    if (player_name[0] == '\0')
-      strcpy(player_name, "Player");
-    hook_log_debug("Kick: %s [%" PRIu64 "] kicked\n", player_name, steamid);
-    hook_socket_finish_ok();
-  } else {
-    hook_log_debug("Kick: player with SteamID64 %" PRIu64 " not found\n",
-                   steamid);
+  pc_actor_info_t results[32] = {0};
+  int count = player_get_info(PC_FIND_BY_STEAMID, g_socket_slot.req.args[0],
+                              results, 32);
+  if (count == 0) {
     hook_socket_finish_err("player not found");
+    return;
   }
+
+  AGameInfo_eventKickIdler(ctx->game_info, results[0].pc);
+
+  hook_log_debug("Kick: %s [%" PRIu64 "] kicked\n", results[0].name,
+                 results[0].steamid);
+  hook_socket_finish_ok();
 }
 
 /*
@@ -933,16 +1146,18 @@ static void cmd_send_player_message(cmd_ctx_t *ctx) {
     return;
   }
 
-  uint64_t target_id = (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
-  if (target_id == 0) {
-    hook_socket_finish_err("invalid SteamID");
+  pc_actor_info_t results[32] = {0};
+  int count = player_get_info(PC_FIND_BY_STEAMID, g_socket_slot.req.args[0],
+                              results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1) {
+    policy_send_conflict_response(results, count);
     return;
   }
 
-  void **actors = NULL;
-  int actor_count = 0;
-  if (!hook_engine_get_level_actors(&actors, &actor_count))
-    return;
+  pc_actor_info_t target = results[0];
 
   // Build prefixed message
   static const char prefix[] = "[Server->You]: ";
@@ -962,53 +1177,45 @@ static void cmd_send_player_message(cmd_ctx_t *ctx) {
   FString msg_fstr = {0};
   FString_ctor(&msg_fstr, msg_ucs2);
   FName ftype = {FNAME_ServerSay};
-
-  int found = 0;
-  uint64_t steamid = 0;
-  char player_name[ARG_MAX_CHARS] = {0};
-  for (int i = 0; i < actor_count; i++) {
-    void *actor = actors[i];
-    if (!actor)
-      continue;
-    if (!hook_engine_is_player_controller(UObject_GetName(actor)))
-      continue;
-
-    void *netconn =
-        *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_NetConn);
-    if (!netconn)
-      continue;
-
-    steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID);
-    if (steamid == 0)
-      steamid = *(uint64_t *)((uint8_t *)netconn + UNETCONN_OFFSET_STEAMID_ALT);
-    if (steamid != target_id)
-      continue;
-
-    // Get the player's name
-    void *pri = *(void **)((uint8_t *)actor + APLAYERCONTROLLER_OFFSET_PRI);
-    if (pri) {
-      FString *name_fs = (FString *)((uint8_t *)pri + PRI_OFFSET_PlayerName);
-      if (name_fs->Data && name_fs->Num > 0)
-        ucs2_to_utf8(name_fs->Data, player_name, sizeof(player_name));
-    }
-    APlayerController_eventClientMessage(actor, &msg_fstr, ftype);
-    found = 1;
-    break;
-  }
+  APlayerController_eventClientMessage(target.pc, &msg_fstr, ftype);
   FString_dtor(&msg_fstr);
 
-  if (found) {
-    if (player_name[0] == '\0')
-      strcpy(player_name, "Player");
-    hook_log_debug("SendPlayerMessage: (%s[%" PRIu64 "]): %s\n", player_name,
-                   steamid, g_socket_slot.req.args[1]);
-    hook_socket_finish_ok();
-  } else {
-    hook_log_debug("SendPlayerMessage: player with SteamID64 %" PRIu64
-                   " not found\n",
-                   steamid);
-    hook_socket_finish_err("player not found");
+  hook_log_debug("SendPlayerMessage: (%s[%" PRIu64 "]): %s\n", target.name,
+                 target.steamid, g_socket_slot.req.args[1]);
+  hook_socket_finish_ok();
+}
+
+/*
+ * Kicks a player by name.
+ * Optional: Force=1 to kick all players sharing the same name.
+ * Args: Name [Force]
+ */
+static void cmd_kick_name(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Name [Force]");
+    return;
   }
+
+  int force =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0] == '1');
+
+  pc_actor_info_t results[32] = {0};
+  int count =
+      player_get_info(PC_FIND_BY_NAME, g_socket_slot.req.args[0], results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1 && !force) {
+    policy_send_conflict_response(results, count);
+    return;
+  }
+
+  for (int i = 0; i < count; i++) {
+    AGameInfo_eventKickIdler(ctx->game_info, results[i].pc);
+    hook_log_debug("KickName: %s [%" PRIu64 "] kicked\n", results[i].name,
+                   results[i].steamid);
+  }
+  hook_socket_finish_ok();
 }
 
 // ============================================================================
@@ -1241,7 +1448,7 @@ static void cmd_get_banned_ids(cmd_ctx_t *ctx) {
     if (!first)
       jb_raw(&jb, ",");
     first = 0;
-    jb_raw(&jb, "{\"id\":");
+    jb_raw(&jb, "{\"steamid\":");
     jb_str(&jb, id_buf);
     jb_raw(&jb, ",\"name\":");
     jb_str(&jb, name_buf);
@@ -1256,10 +1463,7 @@ static void cmd_get_banned_ids(cmd_ctx_t *ctx) {
 /*
  * Adds an IP ban to the live IPPolicies TArray and persists to GConfig.
  * Args: IP (e.g. "1.2.3.4" or "1.2.3.*")
- * Entry format: "DENY;<ip>"
- * Takes effect immediately.
- * Does NOT kick currently connected players.
- * Persisted via CfgSetStr + CfgFlush.
+ * Takes effect immediately. Does NOT kick currently connected players.
  */
 static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -1275,49 +1479,8 @@ static void cmd_add_ip_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  TArrayFString *arr =
-      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_IPPolicies);
-  hook_log_debug("BanIP: IPPolicies Data=%p Num=%d Max=%d\n", (void *)arr->Data,
-                 arr->Num, arr->Max);
-
-  if (!arr->Data || arr->Num >= arr->Max) {
-    hook_socket_finish_err("IPPolicies TArray full or uninitialized");
+  if (!policy_ban_ip(ac, g_socket_slot.req.args[0]))
     return;
-  }
-
-  if (strlen(g_socket_slot.req.args[0]) > 45) {
-    hook_socket_finish_err("IP too long");
-    return;
-  }
-
-  // Build "DENY;<ip>" policy string
-  static const char prefix[] = "DENY;";
-  const size_t prefix_len = sizeof(prefix) - 1;
-  const size_t ip_len = strlen(g_socket_slot.req.args[0]);
-  const size_t copy_len =
-      ip_len < (64 - prefix_len - 1) ? ip_len : (64 - prefix_len - 1);
-  char policy_utf8[64];
-
-  memcpy(policy_utf8, prefix, prefix_len);
-  memcpy(policy_utf8 + prefix_len, g_socket_slot.req.args[0], copy_len);
-  policy_utf8[prefix_len + copy_len] = '\0';
-
-  ucs2_t policy_ucs2[64] = {0};
-  utf8_to_ucs2(policy_utf8, policy_ucs2, 64);
-
-  // Write new FString entry into the next TArray slot
-  FString_ctor(&arr->Data[arr->Num], policy_ucs2);
-  arr->Num++;
-  hook_log_debug("BanIP: added \"%s\" at slot %d\n", policy_utf8, arr->Num - 1);
-
-  // Record in session list for repopulate_bans() after ServerTravel
-  hook_policy_add_session_ip_ban(policy_utf8);
-
-  // Persist to GConfig
-  void *gcfg = hook_engine_get_gconfig();
-
-  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_IP, policy_ucs2, BAN_FILE, 0);
-  GConfig_Flush(gcfg, 1, BAN_FILE);
 
   hook_socket_finish_ok();
 }
@@ -1409,18 +1572,14 @@ static void cmd_remove_ip_ban(cmd_ctx_t *ctx) {
 
 /*
  * Adds a Steam ban to the live BannedIDs TArray and persists to GConfig.
- * Args:          SteamID64 [, Name]
- * Name:          optional, defaults to "HookBan".
- * Entry format: "<steamid64> <name>"
- * Takes effect immediately.
- * Does NOT kick currently connected players.
- * Persisted via CfgSetStr + CfgFlush.
+ * Args: SteamID64 [, Name]
+ * Takes effect immediately. Does NOT kick currently connected players.
  */
 static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
   (void)ctx;
 
   if (g_socket_slot.req.argc < 1) {
-    hook_socket_finish_err("args: SteamID64 [, Name]");
+    hook_socket_finish_err("args: SteamID64 [Name]");
     return;
   }
 
@@ -1430,67 +1589,13 @@ static void cmd_add_steam_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  TArrayFString *arr =
-      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
-  hook_log_debug("BanID: BannedIDs Data=%p Num=%d Max=%d\n", (void *)arr->Data,
-                 arr->Num, arr->Max);
-
-  // Bootstrap uninitialized TArray
-  if (!arr->Data || arr->Max == 0) {
-    arr->Data =
-        (FString *)calloc(POLICY_BANNEDIDS_INITIAL_MAX, sizeof(FString));
-    if (!arr->Data) {
-      hook_socket_finish_err("BannedIDs TArray alloc failed");
-      return;
-    }
-    arr->Num = 0;
-    arr->Max = POLICY_BANNEDIDS_INITIAL_MAX;
-    hook_log_debug("BanID: bootstrapped BannedIDs TArray Max=%d\n",
-                   POLICY_BANNEDIDS_INITIAL_MAX);
-  }
-
-  if (arr->Num >= arr->Max) {
-    hook_socket_finish_err("BannedIDs TArray full");
-    return;
-  }
-
-  // Build "<steamid64> <name>" entry
   const char *name =
       (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0])
           ? g_socket_slot.req.args[1]
           : "HookBan";
 
-  char id_buf[32] = {0};
-  char name_buf[64] = {0};
-  const size_t id_len = strlen(g_socket_slot.req.args[0]);
-  const size_t name_len = strlen(name);
-  memcpy(id_buf, g_socket_slot.req.args[0], id_len < 31 ? id_len : 31);
-  memcpy(name_buf, name, name_len < 63 ? name_len : 63);
-
-  // "<id> <name>\0"
-  char entry_utf8[ARG_MAX_CHARS];
-  const size_t id_part = strlen(id_buf);
-  const size_t name_part = strlen(name_buf);
-  memcpy(entry_utf8, id_buf, id_part);
-  entry_utf8[id_part] = ' ';
-  memcpy(entry_utf8 + id_part + 1, name_buf, name_part);
-  entry_utf8[id_part + 1 + name_part] = '\0';
-
-  ucs2_t entry_ucs2[ARG_MAX_CHARS] = {0};
-  utf8_to_ucs2(entry_utf8, entry_ucs2, ARG_MAX_CHARS);
-
-  FString_ctor(&arr->Data[arr->Num], entry_ucs2);
-  arr->Num++;
-  hook_log_debug("BanID: added \"%s\" at slot %d\n", entry_utf8, arr->Num - 1);
-
-  // Record in session list for repopulate_bans() after ServerTravel
-  hook_policy_add_session_steam_ban(entry_utf8);
-
-  // Persist to GConfig
-  void *gcfg = hook_engine_get_gconfig();
-
-  GConfig_SetString(gcfg, BAN_SECTION, BAN_KEY_STEAM, entry_ucs2, BAN_FILE, 0);
-  GConfig_Flush(gcfg, 1, BAN_FILE);
+  if (!policy_ban_steamid(ac, g_socket_slot.req.args[0], name))
+    return;
 
   hook_socket_finish_ok();
 }
@@ -1517,12 +1622,12 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
     return;
   }
 
-  const char *target_id = g_socket_slot.req.args[0];
+  const char *target_steamid = g_socket_slot.req.args[0];
 
   TArrayFString *arr =
       (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
   hook_log_debug("UnbanID: BannedIDs Num=%d searching for \"%s\"\n", arr->Num,
-                 target_id);
+                 target_steamid);
 
   if (!arr->Data || arr->Num <= 0) {
     hook_socket_finish_err("BannedIDs TArray empty or uninitialized");
@@ -1539,7 +1644,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
     ucs2_to_utf8(entry->Data, utf8, sizeof(utf8));
     char id_part[32] = {0};
     extract_steamid_prefix(utf8, id_part, sizeof(id_part));
-    if (strcmp(id_part, target_id) == 0) {
+    if (strcmp(id_part, target_steamid) == 0) {
       hook_log_debug("UnbanID: removing live slot %d \"%s\"\n", i, utf8);
       tarray_fstring_remove(arr, i);
       live_removed++;
@@ -1586,7 +1691,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
       ucs2_to_utf8(eval, val_utf8, sizeof(val_utf8));
       char id_part[32] = {0};
       extract_steamid_prefix(val_utf8, id_part, sizeof(id_part));
-      if (strcmp(id_part, target_id) != 0)
+      if (strcmp(id_part, target_steamid) != 0)
         continue;
 
       hook_log_debug("UnbanID: removing from GConfig: \"%s\"\n", val_utf8);
@@ -1605,7 +1710,7 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
       continue;
     char id_part[32] = {0};
     extract_steamid_prefix(entry, id_part, sizeof(id_part));
-    if (strcmp(id_part, target_id) == 0) {
+    if (strcmp(id_part, target_steamid) == 0) {
       hook_policy_remove_session_steam_ban(i);
       sess_removed++;
     }
@@ -1617,6 +1722,231 @@ static void cmd_remove_steam_ban(cmd_ctx_t *ctx) {
   if (live_removed == 0 && cfg_removed == 0) {
     hook_socket_finish_err("no matching ban found");
     return;
+  }
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Bans a player by name, resolving to SteamID64 for the actual ban.
+ * Optional: Force=1 to affect all players sharing the same name.
+ * Args: Name [Force]
+ */
+static void cmd_ban_name(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Name [Force]");
+    return;
+  }
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  int force =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0] == '1');
+
+  pc_actor_info_t results[32] = {0};
+  int count =
+      player_get_info(PC_FIND_BY_NAME, g_socket_slot.req.args[0], results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1 && !force) {
+    policy_send_conflict_response(results, count);
+    return;
+  }
+
+  // Check if the banned list isn't full already
+  // Skip capacity check if uninitialized, policy_ban_steamid() bootstraps it
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  if (arr->Data && (arr->Num + count > arr->Max)) {
+    hook_socket_finish_err("BannedIDs TArray insufficient capacity");
+    return;
+  }
+
+  // Ban each matched player by their resolved SteamID
+  for (int i = 0; i < count; i++) {
+    if (results[i].steamid == 0) {
+      hook_log_debug("BanName: skipping %s, no SteamID\n", results[i].name);
+      continue;
+    }
+    char sid[32];
+    snprintf(sid, sizeof(sid), "%" PRIu64, results[i].steamid);
+    if (!policy_ban_steamid(ac, sid, results[i].name))
+      return;
+
+    hook_log_debug("BanName: banned %s [%" PRIu64 "]\n", results[i].name,
+                   results[i].steamid);
+  }
+
+  hook_socket_finish_ok();
+}
+
+// ============================================================================
+// KICK / BAN
+// ============================================================================
+/*
+ * Bans a player's SteamID64 then kicks.
+ * Ban is applied before kick to ensure the player cannot reconnect.
+ * Optional: Force=1 to kick all players sharing the same SteamID64.
+ * Args: SteamID64 [Force]
+ */
+static void cmd_kickban_id(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: SteamID64 [Force]");
+    return;
+  }
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  uint64_t target_steamid =
+      (uint64_t)strtoull(g_socket_slot.req.args[0], NULL, 10);
+  if (target_steamid == 0) {
+    hook_socket_finish_err("invalid SteamID64");
+    return;
+  }
+
+  int force =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0] == '1');
+
+  // Find first, fail if not connected
+  pc_actor_info_t results[32] = {0};
+  int count = player_get_info(PC_FIND_BY_STEAMID, g_socket_slot.req.args[0],
+                              results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1 && !force) {
+    policy_send_conflict_response(results, count);
+    return;
+  }
+
+  // Ban first, kick second
+  if (!policy_ban_steamid(ac, g_socket_slot.req.args[0], "HookBan"))
+    return;
+
+  for (int i = 0; i < count; i++) {
+    AGameInfo_eventKickIdler(ctx->game_info, results[i].pc);
+    hook_log_debug("KickBanID: kicked and banned %s [%" PRIu64 "]\n",
+                   results[i].name, results[i].steamid);
+  }
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Bans a player's IP then kicks.
+ * Ban is applied before kick to ensure the player cannot reconnect.
+ * Optional: Force=1 to affect all players sharing the same IP.
+ * Args: IP [Force]
+ */
+static void cmd_kickban_ip(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: IP [Force]");
+    return;
+  }
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  int force =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0] == '1');
+
+  // Find player by IP
+  pc_actor_info_t results[32] = {0};
+  int count =
+      player_get_info(PC_FIND_BY_IP, g_socket_slot.req.args[0], results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1 && !force) {
+    policy_send_conflict_response(results, count);
+    return;
+  }
+
+  pc_actor_info_t target = results[0];
+
+  // Ban IP first
+  if (!policy_ban_ip(ac, target.ip))
+    return;
+
+  // Kick all affected players
+  for (int i = 0; i < count; i++) {
+    AGameInfo_eventKickIdler(ctx->game_info, results[i].pc);
+    hook_log_debug("KickBanIP: kicked and banned %s [%" PRIu64 "] ip=%s\n",
+                   results[i].name, results[i].steamid, target.ip);
+  }
+
+  hook_socket_finish_ok();
+}
+
+/*
+ * Kicks and bans a player by name, resolving to SteamID64 for the ban.
+ * Ban is applied before kick.
+ * Optional: Force=1 to affect all players sharing the same name.
+ * Args: Name [Force]
+ */
+static void cmd_kickban_name(cmd_ctx_t *ctx) {
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Name [Force]");
+    return;
+  }
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  int force =
+      (g_socket_slot.req.argc >= 2 && g_socket_slot.req.args[1][0] == '1');
+
+  pc_actor_info_t results[32] = {0};
+  int count =
+      player_get_info(PC_FIND_BY_NAME, g_socket_slot.req.args[0], results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  } else if (count > 1 && !force) {
+    policy_send_conflict_response(results, count);
+    return;
+  }
+
+  // Check if the banned list isn't full already
+  // Skip capacity check if uninitialized, policy_ban_steamid() bootstraps it
+  TArrayFString *arr =
+      (TArrayFString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_BannedIDs);
+  if (arr->Data && (arr->Num + count > arr->Max)) {
+    hook_socket_finish_err("BannedIDs TArray insufficient capacity");
+    return;
+  }
+
+  // Ban first, kick second
+  for (int i = 0; i < count; i++) {
+    if (results[i].steamid == 0) {
+      hook_log_debug("KickBanName: skipping %s, no SteamID\n", results[i].name);
+      continue;
+    }
+    char sid[32];
+    snprintf(sid, sizeof(sid), "%" PRIu64, results[i].steamid);
+    if (!policy_ban_steamid(ac, sid, results[i].name))
+      return;
+
+    AGameInfo_eventKickIdler(ctx->game_info, results[i].pc);
+    hook_log_debug("KickBanName: kicked and banned %s [%" PRIu64 "]\n",
+                   results[i].name, results[i].steamid);
   }
 
   hook_socket_finish_ok();
@@ -1821,7 +2151,8 @@ static void cmd_set_live_max_spectators(cmd_ctx_t *ctx) {
     return;
   }
 
-  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxSpectators, new_max, "SetLiveMaxSpectators");
+  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxSpectators, new_max,
+                   "SetLiveMaxSpectators");
 }
 
 /*
@@ -1844,7 +2175,8 @@ static void cmd_set_live_max_players(cmd_ctx_t *ctx) {
     return;
   }
 
-  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxPlayers, new_max, "SetLiveMaxPlayers");
+  gametype_set_int(ctx, GAMETYPE_OFFSET_MaxPlayers, new_max,
+                   "SetLiveMaxPlayers");
 }
 
 /*
@@ -1897,7 +2229,8 @@ static void cmd_set_live_friendly_fire_scale(cmd_ctx_t *ctx) {
     return;
   }
 
-  gametype_set_float(ctx, GAMETYPE_OFFSET_FriendlyFireScale, new_scale, "SetLiveFriendlyFireScale");
+  gametype_set_float(ctx, GAMETYPE_OFFSET_FriendlyFireScale, new_scale,
+                     "SetLiveFriendlyFireScale");
 }
 
 // ============================================================================
@@ -2204,7 +2537,7 @@ static void cmd_cfg_set_bool(cmd_ctx_t *ctx) {
 /*
  * Retrieves all key=value pairs from a GConfig section.
  * Args: Section [, File]
- * File: optionl, empty string uses GConfig default.
+ * File: optional, empty string uses GConfig default.
  * GConfig_GetSection returns a double-null-terminated flat buffer:
  *   "Key1=Val1\0Key2=Val2\0\0"
  * Parses it into a JSON array of strings.
@@ -2316,8 +2649,7 @@ static void cmd_cfg_delete_str(cmd_ctx_t *ctx) {
  * Deletes all entries matching Section+Key from GConfig (value ignored).
  * Args: Section, Key [, File [, Max]]
  * File: optional, empty string uses GConfig default.
- * Max:  optional, 0 = delete all matches, N = delete at
- * most N occurrences.
+ * Max:  optional, 0 = delete all matches, N = delete at most N occurrences.
  */
 static void cmd_cfg_delete_key_str(cmd_ctx_t *ctx) {
   (void)ctx;
@@ -2413,6 +2745,7 @@ static const cmd_entry_t cmd_table[] = {
     // PLAYERS
     {"players", cmd_get_players, 1},
     {"kick", cmd_kick, 1},
+    {"kickname", cmd_kick_name, 1},
     {"sendplayermessage", cmd_send_player_message, 1},
     // ZEDS
     {"zeds", cmd_get_zeds, 1},
@@ -2426,11 +2759,16 @@ static const cmd_entry_t cmd_table[] = {
     {"unbanip", cmd_remove_ip_ban, 1},
     {"banid", cmd_add_steam_ban, 1},
     {"unbanid", cmd_remove_steam_ban, 1},
+    {"banname", cmd_ban_name, 1},
+    // KICK / BAN
+    {"kickbanip", cmd_kickban_ip, 1},
+    {"kickbanid", cmd_kickban_id, 1},
+    {"kickbanname", cmd_kickban_name, 1},
     // LIVE
     {"setliveservername", cmd_set_live_server_name, 1},
     {"setliveshortname", cmd_set_live_short_name, 1},
     {"setliveadminname", cmd_set_live_admin_name, 1},
-    {"setliveadminmail", cmd_set_live_admin_email, 1},
+    {"setliveadminemail", cmd_set_live_admin_email, 1},
     {"setliveserverregion", cmd_set_live_server_region, 1},
     {"setlivemotd", cmd_set_live_motd, 1},
     {"setlivegamedifficulty", cmd_set_live_game_difficulty, 1},
