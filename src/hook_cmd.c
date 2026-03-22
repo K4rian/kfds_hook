@@ -20,9 +20,10 @@
 // ============================================================================
 // COMMAND DEFINES
 // ============================================================================
-#define CFG_BUF_CHARS 1024 // max config value / section / key (UTF-8)
-#define CFG_DEL_SEC_BUF (CFG_BUF_CHARS * 4)
+#define CFG_BUF_CHARS       1024 // max config value / section / key (UTF-8)
+#define CFG_DEL_SEC_BUF     (CFG_BUF_CHARS * 4)
 #define CFG_DEL_MAX_ENTRIES 512
+#define ACTOR_FATAL_DAMAGE  100000 // enough to kill an entire army
 
 // ============================================================================
 // COMMAND TYPES
@@ -587,6 +588,68 @@ static void policy_send_conflict_response(pc_actor_info_t *info, int count) {
   hook_socket_finish_json(&jb);
 }
 
+/*
+ * Applies damage to one actor (target != NULL) or all actors of the
+ * given type (target == NULL).
+ * is_zed: 1 = target zed actors, 0 = target PCs.
+ * Returns the number of actors affected.
+ */
+static int actor_take_damage(void *target, int damage, int is_zed) {
+  if (target) {
+    if (!is_zed) {
+        void *pawn = *(void **)((uint8_t *)target + 
+                                APLAYERCONTROLLER_OFFSET_Pawn);
+        if (!pawn)
+            return 0;
+        target = pawn;
+    }
+    int health = *(int *)((uint8_t *)target + APAWN_OFFSET_Health);
+    if (health <= 0)
+        return 0;
+
+    AActor_eventTakeDamage(target, damage, NULL, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                           0.0f, NULL, 0);
+    return 1;
+  }
+
+  void **actors = NULL;
+  int actor_count = 0;
+  if (!hook_engine_get_level_actors(&actors, &actor_count))
+    return 0;
+
+  int count = 0;
+  for (int i = 0; i < actor_count; i++) {
+    void *actor = actors[i];
+    if (!actor)
+      continue;
+
+    const ucs2_t *name = UObject_GetName(actor);
+    if (!name)
+      continue;
+
+    int match = is_zed ? hook_engine_is_zed_actor(name)
+                       : hook_engine_is_player_controller(name);
+    if (!match)
+      continue;
+
+    if (!is_zed) {
+        void *pawn = *(void **)((uint8_t *)actor + 
+                                APLAYERCONTROLLER_OFFSET_Pawn);
+        if (!pawn)
+            continue;
+        actor = pawn;
+    }
+    int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
+    if (health <= 0)
+        continue;
+
+    AActor_eventTakeDamage(actor, damage, NULL, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                           0.0f, NULL, 0);
+    count++;
+  }
+  return count;
+}
+
 // ============================================================================
 // PING
 // ============================================================================
@@ -1017,6 +1080,7 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
     memcpy(&dosh, (uint8_t *)pri + PRI_OFFSET_Dosh, sizeof(dosh));
     int kills = *(int *)((uint8_t *)pri + PRI_OFFSET_Kills);
     int deaths = *(int *)((uint8_t *)pri + PRI_OFFSET_Deaths);
+    int spectator = *(int *)((uint8_t *)pri + PRI_OFFSET_bIsSpectator);
     // TODO: assists
 
     // Health and armor from Pawn: -1 if dead/spectating (Pawn == NULL)
@@ -1093,6 +1157,8 @@ static void cmd_get_players(cmd_ctx_t *ctx) {
     } else {
       jb_raw(&jb, ",\"perk\":null,\"perk_level\":null");
     }
+    jb_raw(&jb, ",\"spectator\":");
+    jb_bool(&jb, spectator);
     jb_raw(&jb, "}");
   }
 
@@ -1218,6 +1284,164 @@ static void cmd_kick_name(cmd_ctx_t *ctx) {
   hook_socket_finish_ok();
 }
 
+/*
+ * Instantly kills a player by SteamID64.
+ * Args: SteamID64
+ */
+static void cmd_kill_player(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (!hook_engine_is_game_started()) {
+    hook_socket_finish_err("game has not been started yet");
+    return;
+  }
+
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: SteamID64");
+    return;
+  }
+
+  pc_actor_info_t results[32] = {0};
+  int count = player_get_info(PC_FIND_BY_STEAMID, g_socket_slot.req.args[0],
+                              results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  }
+
+  if (!actor_take_damage(results[0].pc, ACTOR_FATAL_DAMAGE, 0)) {
+    hook_socket_finish_err("Player is already dead or spectating");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"name\":");
+  jb_str(&jb, results[0].name);
+  jb_raw(&jb, ",\"steamid\":");
+  jb_str(&jb, g_socket_slot.req.args[0]);
+  jb_raw(&jb, ",\"damage\":");
+  jb_int(&jb, ACTOR_FATAL_DAMAGE);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("KillPlayer: %s [%" PRIu64 "] killed\n", results[0].name,
+                 results[0].steamid);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Instantly kills all connected players.
+ */
+static void cmd_kill_players(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (!hook_engine_is_game_started()) {
+    hook_socket_finish_err("game has not been started yet");
+    return;
+  }
+
+  int count = actor_take_damage(NULL, ACTOR_FATAL_DAMAGE, 0);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"kills\":");
+  jb_int(&jb, count);
+  jb_raw(&jb, ",\"damage\":");
+  jb_int(&jb, ACTOR_FATAL_DAMAGE);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("KillPlayers: %d killed\n", count);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Deals damage to a player by SteamID64.
+ * Args: SteamID64 Amount
+ */
+static void cmd_damage_player(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (!hook_engine_is_game_started()) {
+    hook_socket_finish_err("game has not been started yet");
+    return;
+  }
+
+  if (g_socket_slot.req.argc < 2) {
+    hook_socket_finish_err("args: SteamID64 Amount");
+    return;
+  }
+
+  int damage = atoi(g_socket_slot.req.args[1]);
+  if (damage <= 0) {
+    hook_socket_finish_err("amount must be > 0");
+    return;
+  }
+
+  pc_actor_info_t results[32] = {0};
+  int count = player_get_info(PC_FIND_BY_STEAMID, g_socket_slot.req.args[0],
+                              results, 32);
+  if (count == 0) {
+    hook_socket_finish_err("player not found");
+    return;
+  }
+
+  if (!actor_take_damage(results[0].pc, damage, 0)) {
+    hook_socket_finish_err("Player is already dead or spectating");
+    return;
+  }
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"name\":");
+  jb_str(&jb, results[0].name);
+  jb_raw(&jb, ",\"steamid\":");
+  jb_str(&jb, g_socket_slot.req.args[0]);
+  jb_raw(&jb, ",\"damage\":");
+  jb_int(&jb, damage);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("DamagePlayer: %s [%" PRIu64 "] damage=%d\n", results[0].name,
+                 results[0].steamid, damage);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Deals damage to all connected players.
+ * Args: Amount
+ */
+static void cmd_damage_players(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (!hook_engine_is_game_started()) {
+    hook_socket_finish_err("game has not been started yet");
+    return;
+  }
+
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Amount");
+    return;
+  }
+
+  int damage = atoi(g_socket_slot.req.args[0]);
+  if (damage <= 0) {
+    hook_socket_finish_err("amount must be > 0");
+    return;
+  }
+
+  int count = actor_take_damage(NULL, damage, 0);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"affected\":");
+  jb_int(&jb, count);
+  jb_raw(&jb, ",\"damage\":");
+  jb_int(&jb, damage);
+  jb_raw(&jb, "}}");
+
+  hook_log_debug("DamagePlayers: %d affected damage=%d\n", count, damage);
+  hook_socket_finish_json(&jb);
+}
+
 // ============================================================================
 // ZEDS
 // ============================================================================
@@ -1290,43 +1514,22 @@ static void cmd_get_zeds(cmd_ctx_t *ctx) {
 static void cmd_kill_zeds(cmd_ctx_t *ctx) {
   (void)ctx;
 
-  void **actors = NULL;
-  int actor_count = 0;
-  if (!hook_engine_get_level_actors(&actors, &actor_count))
+  if (!hook_engine_is_game_started()) {
+    hook_socket_finish_err("game has not been started yet");
     return;
-
-  int killed = 0;
-  for (int i = 0; i < actor_count; i++) {
-    void *actor = actors[i];
-    if (!actor)
-      continue;
-    if (!hook_engine_is_zed_actor(UObject_GetName(actor)))
-      continue;
-
-    int health = *(int *)((uint8_t *)actor + APAWN_OFFSET_Health);
-    if (health <= 0)
-      continue;
-
-    // Call through the normal death path:
-    // fires Died(), death animation, ragdoll, and proper actor cleanup.
-    // Damage of 100000 ensures death regardless of difficulty or monster HP.
-    // NULL instigator and damage type are safe.
-    AActor_eventTakeDamage(actor, 100000,    // damage
-                           NULL,             // instigator APawn
-                           0.0f, 0.0f, 0.0f, // HitLocation FVector
-                           0.0f, 0.0f, 0.0f, // Momentum FVector
-                           NULL,             // DamageType UClass*
-                           0);               // extra
-    killed++;
   }
+
+  int count = actor_take_damage(NULL, ACTOR_FATAL_DAMAGE, 1);
 
   json_buf_t jb;
   jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":{\"killed\":");
-  jb_int(&jb, killed);
+  jb_raw(&jb, "{\"ok\":true,\"d\":{\"kills\":");
+  jb_int(&jb, count);
+  jb_raw(&jb, ",\"damage\":");
+  jb_int(&jb, ACTOR_FATAL_DAMAGE);
   jb_raw(&jb, "}}");
 
-  hook_log_debug("KillZeds: killed %d zed(s)\n", killed);
+  hook_log_debug("KillZeds: %d killed\n", count);
   hook_socket_finish_json(&jb);
 }
 
@@ -2747,6 +2950,10 @@ static const cmd_entry_t cmd_table[] = {
     {"kick", cmd_kick, 1},
     {"kickname", cmd_kick_name, 1},
     {"sendplayermessage", cmd_send_player_message, 1},
+    {"killplayer", cmd_kill_player, 1},
+    {"killplayers", cmd_kill_players, 1},
+    {"damageplayer", cmd_damage_player, 1},
+    {"damageplayers", cmd_damage_players, 1},
     // ZEDS
     {"zeds", cmd_get_zeds, 1},
     {"killzeds", cmd_kill_zeds, 1},

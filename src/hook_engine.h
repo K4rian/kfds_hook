@@ -155,6 +155,7 @@
  *   +0x3cc  Deaths                   int
  *   +0x3d0  PlayerName               FString
  *   +0x45c  Kills                    int
+ *   +0x4c4  bIsSpectator             bool
  *   +0x5f4  ClientVeteranSkill       UClass*
  *   +0x5f8  ClientVeteranSkillLevel  int
  */
@@ -163,6 +164,7 @@
 #define PRI_OFFSET_Deaths                  0x3cc
 #define PRI_OFFSET_PlayerName              0x3d0
 #define PRI_OFFSET_Kills                   0x45c
+#define PRI_OFFSET_bIsSpectator            0x4c4
 #define PRI_OFFSET_ClientVeteranSkill      0x5f4
 #define PRI_OFFSET_ClientVeteranSkillLevel 0x5f8
 
