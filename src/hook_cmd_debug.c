@@ -244,9 +244,9 @@ void cmd_debug_pri_dump(cmd_ctx_t *ctx) {
       }
       name_buf[j] = '\0';
     }
-    snprintf(label, sizeof(label), "PRI[%d]=%p (%s) +0x000..+0x5ff", p, pri,
+    snprintf(label, sizeof(label), "PRI[%d]=%p (%s) +0x000..+0x7ff", p, pri,
              name_buf);
-    hexdump_to(f, label, (uint8_t *)pri + 0x000, 0x600);
+    hexdump_to(f, label, (uint8_t *)pri + 0x000, +0x800);
   }
 
   fclose(f);
@@ -317,6 +317,38 @@ void cmd_debug_actors_dump(cmd_ctx_t *ctx) {
 
   hook_log_debug("DebugActorsDump: dump saved to %s (%d actors)\n", path,
                  non_null);
+  hook_socket_finish_json(&jb);
+}
+
+/*
+ * Dumps the AccessControl (AC) actor memory layout to a file.
+ */
+void cmd_debug_ac_dump(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  char path[512];
+  FILE *f = dump_open("ACDump", NULL, path, sizeof(path));
+  if (!f) {
+    hook_socket_finish_err("failed to open dump file");
+    return;
+  }
+
+  char label[64];
+  snprintf(label, sizeof(label), "AccessControl=%p +0x000..+0xfff", ac);
+  hexdump_to(f, label, (uint8_t *)ac, +0x1000);
+  fclose(f);
+
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  jb_str(&jb, path);
+  jb_raw(&jb, "}");
   hook_socket_finish_json(&jb);
 }
 
@@ -626,6 +658,7 @@ static const cmd_entry_t debug_cmd_table[] = {
     {"debuggridump", cmd_debug_gri_dump, 1},
     {"debugpridump", cmd_debug_pri_dump, 1},
     {"debugactorsdump", cmd_debug_actors_dump, 1},
+    {"debugacdump", cmd_debug_ac_dump, 1},
     {"debugpcdump", cmd_debug_pc_dump, 1},
     {"debugpcpawndump", cmd_debug_pcpawn_dump, 1},
     {"debugpcnetconndump", cmd_debug_pcnetconn_dump, 1},

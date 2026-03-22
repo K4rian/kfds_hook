@@ -1,5 +1,7 @@
 #include <dlfcn.h>
+#include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include "hook_config.h"
 #include "hook_log.h"
@@ -20,6 +22,23 @@
 static _Atomic int hook_detached = 0;
 static struct sigaction old_sigint;
 static struct sigaction old_sigterm;
+
+// ============================================================================
+// HEARTBEAT
+// ============================================================================
+/*
+ * Emits a periodic log line at info level.
+ * Interval is controlled by g_config.heartbeat_interval (seconds).
+ * Detached, no cleanup needed on shutdown, _exit() reaps it immediately.
+ */
+static void *heartbeat_thread(void *arg) {
+  (void)arg;
+  while (1) {
+    sleep((unsigned int)g_config.heartbeat_interval);
+    hook_log_info("<HEARTBEAT>\n");
+  }
+  return NULL;
+}
 
 // ============================================================================
 // KFDS_HOOK
@@ -53,6 +72,17 @@ __attribute__((constructor)) static void hook_attach(void) {
 
   hook_socket_start();
   hook_trampoline_install();
+
+  // Start heartbeat thread if configured
+  if (g_config.heartbeat_interval > 0) {
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&t, &attr, heartbeat_thread, NULL) != 0)
+      hook_log_warn("heartbeat: pthread_create failed\n");
+    pthread_attr_destroy(&attr);
+  }
 
   hook_log_info("kfds_hook init complete\n");
 }

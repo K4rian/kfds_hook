@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "hook_config.h"
 #include "hook_log.h"
@@ -19,6 +20,7 @@ hook_config_t g_config = {
     .log_level = HOOK_LOG_LEVEL_INFO,
 #endif
     .log_file = "",
+    .heartbeat_interval = 0,
     .socket_path = "/tmp/kfds_hook.sock",
     .socket_maxpoll = 10,
     .socket_deadline = 2,
@@ -63,6 +65,10 @@ static int config_handler(void *user, const char *section, const char *name,
       c->log_level = HOOK_LOG_LEVEL_INFO;
   } else if (MATCH("hook", "log_file")) {
     strncpy(c->log_file, value, sizeof(c->log_file) - 1);
+  } else if (MATCH("hook", "heartbeat_interval")) {
+    c->heartbeat_interval = atoi(value);
+    if (c->heartbeat_interval < 0)
+      c->heartbeat_interval = 0;
   } else if (MATCH("socket", "socket_path")) {
     strncpy(c->socket_path, value, sizeof(c->socket_path) - 1);
   } else if (MATCH("socket", "socket_maxpoll")) {
@@ -83,6 +89,79 @@ static int config_handler(void *user, const char *section, const char *name,
 }
 
 // ============================================================================
+// CONFIG ENV OVERRIDES
+// ============================================================================
+/*
+ * Applies environment variable overrides to the config struct.
+ * Called after ini_parse, env variables always take priority over the
+ * config file. Unknown or empty variables are silently ignored.
+ *
+ * KFDSH_CONFIG             handled separately in hook_load_config()
+ * KFDSH_ENABLED            hook_enabled
+ * KFDSH_SECURITY_PATCH     security_patch
+ * KFDSH_UCC_CHECKSUM       ucc_checksum
+ * KFDSH_LOG_LEVEL          log_level (debug|info|warn|error|silent)
+ * KFDSH_LOG_FILE           log_file
+ * KFDSH_SOCKET_PATH        socket_path
+ * KFDSH_SOCKET_MAXPOLL     socket_maxpoll
+ * KFDSH_SOCKET_DEADLINE    socket_deadline
+ * KFDSH_HEARTBEAT_INTERVAL heartbeat_interval
+ * KFDSH_DEBUG_DUMP_DIR     debug_dump_dir
+ */
+static void apply_env_overrides(hook_config_t *c) {
+  const char *v;
+
+  // Hook
+  if ((v = getenv("KFDSH_ENABLED")) && *v)
+    c->hook_enabled = atoi(v);
+  if ((v = getenv("KFDSH_SECURITY_PATCH")) && *v)
+    c->security_patch = atoi(v);
+  if ((v = getenv("KFDSH_UCC_CHECKSUM")) && *v) {
+    strncpy(c->ucc_checksum, v, sizeof(c->ucc_checksum) - 1);
+    c->ucc_checksum[sizeof(c->ucc_checksum) - 1] = '\0';
+  }
+  if ((v = getenv("KFDSH_LOG_LEVEL")) && *v) {
+    if (strcmp(v, "debug") == 0)
+      c->log_level = HOOK_LOG_LEVEL_DEBUG;
+    else if (strcmp(v, "info") == 0)
+      c->log_level = HOOK_LOG_LEVEL_INFO;
+    else if (strcmp(v, "warn") == 0)
+      c->log_level = HOOK_LOG_LEVEL_WARN;
+    else if (strcmp(v, "error") == 0)
+      c->log_level = HOOK_LOG_LEVEL_ERROR;
+    else if (strcmp(v, "silent") == 0)
+      c->log_level = HOOK_LOG_LEVEL_SILENT;
+  }
+  if ((v = getenv("KFDSH_LOG_FILE")) && *v)
+    strncpy(c->log_file, v, sizeof(c->log_file) - 1);
+  if ((v = getenv("KFDSH_HEARTBEAT_INTERVAL")) && *v) {
+    c->heartbeat_interval = atoi(v);
+    if (c->heartbeat_interval < 0)
+      c->heartbeat_interval = 0;
+  }
+
+  // Socket
+  if ((v = getenv("KFDSH_SOCKET_PATH")) && *v)
+    strncpy(c->socket_path, v, sizeof(c->socket_path) - 1);
+  if ((v = getenv("KFDSH_SOCKET_MAXPOLL")) && *v) {
+    c->socket_maxpoll = atoi(v);
+    if (c->socket_maxpoll < 0)
+      c->socket_maxpoll = 0;
+  }
+  if ((v = getenv("KFDSH_SOCKET_DEADLINE")) && *v) {
+    c->socket_deadline = atoi(v);
+    if (c->socket_deadline < 1)
+      c->socket_deadline = 1;
+    if (c->socket_deadline > 30)
+      c->socket_deadline = 30;
+  }
+
+  // Debug
+  if ((v = getenv("KFDSH_DEBUG_DUMP_DIR")) && *v)
+    strncpy(c->debug_dump_dir, v, sizeof(c->debug_dump_dir) - 1);
+}
+
+// ============================================================================
 // CONFIG
 // ============================================================================
 /*
@@ -95,18 +174,25 @@ static int config_handler(void *user, const char *section, const char *name,
  */
 void hook_load_config(void) {
   // Parse config file
-  const char *path = getenv("KFDS_HOOK_CONFIG");
-  if (!path || !*path)
+  const char *path = getenv("KFDSH_CONFIG");
+  int explicit_path = (path && *path);
+  if (!explicit_path)
     path = "./kfds_hook.ini";
-  int r = ini_parse(path, config_handler, &g_config);
+
+  int r = -1;
+  if (explicit_path || access(path, F_OK) == 0)
+    r = ini_parse(path, config_handler, &g_config);
+
+  // Apply env overrides, take priority over the config file
+  apply_env_overrides(&g_config);
 
   // Open the log file now before the first log call
   if (g_config.log_file[0])
     hook_log_open(g_config.log_file);
 
   if (r == -1) {
-    // File not found: warn and continue with defaults
-    hook_log_warn("no config file at %s, using defaults\n", path);
+    if (explicit_path)
+      hook_log_warn("no config file at %s\n", path);
   } else if (r > 0) {
     hook_log_error("config parse error at line %d in %s\n", r, path);
   } else {
@@ -132,9 +218,11 @@ void hook_load_config(void) {
   }
 
   // Dump resolved config at debug level
-  hook_log_debug("log_level=%d log_file=%s socket=%s maxpoll=%d/s deadline=%ds "
+  hook_log_debug("log_level=%d log_file=%s hearbeat_interval=%d "
+                 "socket=%s maxpoll=%d/s deadline=%ds "
                  "debug_dump_dir=%s\n",
-                 g_config.log_level, g_config.log_file, g_config.socket_path,
+                 g_config.log_level, g_config.log_file,
+                 g_config.heartbeat_interval, g_config.socket_path,
                  g_config.socket_maxpoll, g_config.socket_deadline,
                  g_config.debug_dump_dir);
 }
