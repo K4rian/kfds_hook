@@ -317,31 +317,6 @@ static void broadcast_msg(cmd_ctx_t *ctx, int fname_index) {
 }
 
 /*
- * Reads an FString from AccessControl at offset and returns it as JSON string.
- * Returns empty string if the field is unset.
- */
-static void ac_fstring_read(int offset, const char *label) {
-  void *ac = hook_engine_get_access_control();
-  if (!ac) {
-    hook_socket_finish_err("AccessControl not found");
-    return;
-  }
-
-  FString *fs = (FString *)((uint8_t *)ac + offset);
-  json_buf_t jb;
-  jb_init(&jb);
-  jb_raw(&jb, "{\"ok\":true,\"d\":");
-  if (fs->Data && fs->Num > 0)
-    jb_ucs2(&jb, fs->Data);
-  else
-    jb_raw(&jb, "\"\"");
-  jb_raw(&jb, "}");
-
-  hook_log_debug("%s: retrieved\n", label);
-  hook_socket_finish_json(&jb);
-}
-
-/*
  * Parses Section, Key, and optional File from args[0..file_idx] into
  * pre-zeroed UCS-2 buffers. Sets *fp to file if provided.
  * Used by cfg commands that take Section, Key, [, File].
@@ -773,6 +748,12 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
     return;
   }
 
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
   void *gri = hook_engine_get_gri();
   if (!gri) {
     hook_socket_finish_err("GRI not found");
@@ -849,6 +830,12 @@ static void cmd_get_server_info(cmd_ctx_t *ctx) {
   float ffs;
   memcpy(&ffs, ctx->game_info + GAMETYPE_OFFSET_FriendlyFireScale, sizeof(ffs));
   jb_float(&jb, ffs);
+
+  // --------------------
+  // Boolean fields
+  FString *pwd = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_GamePassword);
+  jb_raw(&jb, ",\"password\":");
+  jb_bool(&jb, pwd && pwd->Data && pwd->Num > 0 ? 1 : 0);
 
   // --------------------
 
@@ -1536,24 +1523,6 @@ static void cmd_kill_zeds(cmd_ctx_t *ctx) {
 // ============================================================================
 // ACCESS CONTROL
 // ============================================================================
-/*
- * Reads the live GamePassword from AccessControl.
- * Returns empty string if the password is not set.
- */
-static void cmd_get_game_password(cmd_ctx_t *ctx) {
-  (void)ctx;
-  ac_fstring_read(ACCESSCONTROL_OFFSET_GamePassword, "GamePassword");
-}
-
-/*
- * Reads the live AdminPassword from AccessControl.
- * Returns empty string if the password is not set.
- */
-static void cmd_get_admin_password(cmd_ctx_t *ctx) {
-  (void)ctx;
-  ac_fstring_read(ACCESSCONTROL_OFFSET_AdminPassword, "AdminPassword");
-}
-
 /*
  * Returns the live IPPolicies TArray as a JSON string array.
  * Each entry is a policy string, e.g. "ACCEPT;*" or "DENY;1.2.3.4".
@@ -2397,6 +2366,11 @@ static void cmd_set_live_game_password(cmd_ctx_t *ctx) {
     return;
   }
 
+  if (strlen(g_socket_slot.req.args[0]) > 16) {
+    hook_socket_finish_err("password is too long (max 16 chars)");
+    return;
+  }
+
   void *ac = hook_engine_get_access_control();
   if (!ac) {
     hook_socket_finish_err("AccessControl not found");
@@ -2958,8 +2932,6 @@ static const cmd_entry_t cmd_table[] = {
     {"zeds", cmd_get_zeds, 1},
     {"killzeds", cmd_kill_zeds, 1},
     // ACCESS CONTROL
-    {"gamepassword", cmd_get_game_password, 1},
-    {"adminpassword", cmd_get_admin_password, 1},
     {"ippolicies", cmd_get_ip_policies, 1},
     {"bannedids", cmd_get_banned_ids, 1},
     {"banip", cmd_add_ip_ban, 1},

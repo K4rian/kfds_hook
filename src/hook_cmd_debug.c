@@ -19,6 +19,31 @@
 // DEBUG COMMAND HELPERS
 // ============================================================================
 /*
+ * Reads an FString from AccessControl at offset and returns it as JSON string.
+ * Returns empty string if the field is unset.
+ */
+static void ac_fstring_read(int offset, const char *label) {
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  FString *fs = (FString *)((uint8_t *)ac + offset);
+  json_buf_t jb;
+  jb_init(&jb);
+  jb_raw(&jb, "{\"ok\":true,\"d\":");
+  if (fs->Data && fs->Num > 0)
+    jb_ucs2(&jb, fs->Data);
+  else
+    jb_raw(&jb, "\"\"");
+  jb_raw(&jb, "}");
+
+  hook_log_debug("%s: retrieved\n", label);
+  hook_socket_finish_json(&jb);
+}
+
+/*
  * Write a hex+ASCII dump of [scan_size] bytes from [ptr] to [f].
  * label is printed as a section header.
  */
@@ -116,6 +141,73 @@ static FILE *dump_open(const char *cmd_name, const char *override_path,
 // ============================================================================
 // DEBUG COMMANDS
 // ============================================================================
+/*
+ * Reads the live GamePassword from AccessControl.
+ * Returns empty string if the password is not set.
+ */
+static void cmd_debug_get_game_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+  ac_fstring_read(ACCESSCONTROL_OFFSET_GamePassword, "DebugGamePassword");
+}
+
+/*
+ * Reads the live AdminPassword from AccessControl.
+ * Returns empty string if the password is not set.
+ */
+static void cmd_debug_get_admin_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+  ac_fstring_read(ACCESSCONTROL_OFFSET_AdminPassword, "DebugAdminPassword");
+}
+
+/*
+ * Sets a new admin password.
+ * If the new value fits within the existing FString buffer (new_num <= Max),
+ * it is written in-place. Otherwise a new buffer is allocated via FString_ctor
+ * and swapped in. The old buffer is intentionally leaked.
+ * Effect is immediate, change is lost on map change.
+ */
+static void cmd_debug_set_live_admin_password(cmd_ctx_t *ctx) {
+  (void)ctx;
+
+  if (g_socket_slot.req.argc < 1) {
+    hook_socket_finish_err("args: Password");
+    return;
+  }
+
+  if (strlen(g_socket_slot.req.args[0]) > 16) {
+    hook_socket_finish_err("password is too long (max 16 chars)");
+    return;
+  }
+
+  void *ac = hook_engine_get_access_control();
+  if (!ac) {
+    hook_socket_finish_err("AccessControl not found");
+    return;
+  }
+
+  ucs2_t new_val[ARG_MAX_CHARS] = {0};
+  utf8_to_ucs2(g_socket_slot.req.args[0], new_val, ARG_MAX_CHARS);
+  int new_num = ucs2_len(new_val) + 1; // include NT
+
+  FString *fs = (FString *)((uint8_t *)ac + ACCESSCONTROL_OFFSET_AdminPassword);
+  hook_log_debug("DebugSetLiveAdminPassword: Data=%p Num=%d Max=%d new_num=%d\n",
+                 (void *)fs->Data, fs->Num, fs->Max, new_num);
+
+  if (fs->Max > 0 && new_num <= fs->Max) {
+    memcpy(fs->Data, new_val, (size_t)new_num * sizeof(ucs2_t));
+    fs->Num = new_num;
+    hook_log_debug("DebugSetLiveAdminPassword: wrote in-place\n");
+  } else {
+    FString tmp = {0};
+    FString_ctor(&tmp, new_val);
+    fs->Data = tmp.Data;
+    fs->Num = tmp.Num;
+    fs->Max = tmp.Max;
+    hook_log_debug("DebugSetLiveAdminPassword: allocated new buffer (old buffer leaked)\n");
+  }
+  hook_socket_finish_ok();
+}
+
 /*
  * Dumps the GameInfo (GameType) memory layout to a file.
  */
@@ -654,6 +746,9 @@ void cmd_debug_cfg_empty_section(cmd_ctx_t *ctx) {
 // DEBUG COMMAND DISPATCHER
 // ============================================================================
 static const cmd_entry_t debug_cmd_table[] = {
+    {"debuggamepassword", cmd_debug_get_game_password, 1},
+    {"debugadminpassword", cmd_debug_get_admin_password, 1},
+    {"debugsetliveadminpassword", cmd_debug_set_live_admin_password, 1},
     {"debuggameinfodump", cmd_debug_gameinfo_dump, 1},
     {"debuggridump", cmd_debug_gri_dump, 1},
     {"debugpridump", cmd_debug_pri_dump, 1},
